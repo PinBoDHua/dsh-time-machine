@@ -1,0 +1,7 @@
+node_modules/
+.test-runtime/
+_verify/
+*.log
+verify/chrome-profile/
+verify/shots/
+*.tgz

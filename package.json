@@ -1,0 +1,80 @@
+{
+  "name": "dsh-time-machine",
+  "version": "0.1.0",
+  "description": "时光机 —— 为 DeepSeek Harness 的每一次对话自动留下工作区还原点：影子 Git 持久快照、逐轮记录、影响预览、覆盖/精确回滚，回滚前自动再存安全点，失败自动回滚。不碰用户仓库、不删除忽略文件，让 Agent 的改动从「事后检查」变成「随时可退」。",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./icon.svg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PinBoDHua/dsh-time-machine.git"
+  },
+  "homepage": "https://github.com/PinBoDHua/dsh-time-machine#readme",
+  "bugs": {
+    "url": "https://github.com/PinBoDHua/dsh-time-machine/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.2",
+    "node": ">=22.6"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "time-machine",
+    "rewind",
+    "checkpoint",
+    "snapshot",
+    "undo",
+    "workspace"
+  ],
+  "bin": {
+    "dsh-time-machine": "lib/bin.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:host": "node --test tests/host.test.mjs",
+    "verify": "node scripts/build.mjs && node --test tests/*.test.mjs",
+    "install:plugin": "node scripts/install.mjs",
+    "doctor": "node lib/bin.js doctor",
+    "status": "node lib/bin.js status"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./shared/protocol.js": "./shared/protocol.js"
+  },
+  "files": [
+    "lib",
+    "client",
+    "shared",
+    "src",
+    "scripts",
+    "tests",
+    "docs",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
+}

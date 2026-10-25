@@ -1,0 +1,11 @@
+# dsh-time-machine — bundle patch
+#
+# 这个条目把插件插进 profile 的层栈。必须是 `insert`：裸写 `- id:` 是
+# 按 id 覆盖已存在条目的写法，id 找不到时 dsh-app-boot 只警告并跳过。
+#
+# 宿主半边注册会话事件、/rewind 命令、time_machine 工具和同源接口；
+# 浏览器半边在会话标题栏挂一个「时光机」按钮。配置由插件自己管理
+# （数据目录里的 settings.json），所以这里不写 config。
+- insert:
+    - id: dsh-time-machine
+      name: dsh-time-machine

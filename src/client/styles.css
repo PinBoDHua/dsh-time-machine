@@ -1,0 +1,1174 @@
+/*
+ * 时光机 —— 与宿主同材质的面板。
+ *
+ * 入口是会话标题栏里的一个小胶囊，面板 portal 到 body。表面、阴影、边框与
+ * 文字颜色全部读取宿主 --dsw-* 令牌，因此深浅色与字号设置自动跟随。
+ */
+
+:root {
+  --dtm-blue: var(--dsw-alias-state-business-primary, #4176e6);
+  --dtm-teal: #1f9e99;
+  --dtm-amber: #c07a12;
+  --dtm-green: var(--dsw-alias-state-success-primary, #1f8f5f);
+  --dtm-red: var(--dsw-alias-state-error-primary, #d93a45);
+  --dtm-on-accent: #fff;
+  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));
+  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(0 0 0 / 6%));
+  --dtm-panel-fill: var(--dsw-specific-menu, #fff);
+  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));
+  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 16px 40px rgb(0 0 0 / 18%));
+}
+
+body[data-ds-dark-theme] {
+  --dtm-teal: #5ad7cf;
+  --dtm-amber: #e2a13c;
+  --dtm-green: #4bbf8b;
+  --dtm-red: #f06a6a;
+  --dtm-on-accent: #071116;
+  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(255 255 255 / 6%));
+  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(255 255 255 / 10%));
+  --dtm-panel-fill: var(--dsw-specific-menu, #1b1e22);
+  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(255 255 255 / 10%));
+  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 18px 48px rgb(0 0 0 / 55%));
+}
+
+.dtm_root {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.dtm_trigger {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #555);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 22px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.dtm_trigger:hover,
+.dtm_trigger[aria-expanded='true'] {
+  background: var(--dtm-row-hover);
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_trigger:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));
+  outline-offset: 1px;
+}
+
+.dtm_trigger svg {
+  flex: none;
+  color: var(--dtm-teal);
+}
+
+.dtm_triggerText {
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* ---------------------------------------------------------------- 面板骨架 */
+
+.dtm_panel,
+.dtm_panel * {
+  box-sizing: border-box;
+}
+
+.dtm_panel {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--dsw-radius-lg, 14px);
+  background: var(--dtm-panel-fill);
+  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(20px));
+  --dsw-elevation-stroke-color: var(--dtm-panel-stroke);
+  box-shadow: var(--dtm-panel-shadow), inset 0 0 0 0.5px var(--dtm-panel-stroke);
+  color: var(--dsw-alias-label-secondary, #555);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: default;
+}
+
+.dtm_panelHead {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  row-gap: 8px;
+  padding: 12px 14px 8px;
+}
+
+.dtm_brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dtm_brandIcon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  color: #d9fff8;
+  background:
+    radial-gradient(120% 120% at 20% 0%, rgb(141 232 212 / 38%) 0%, transparent 55%),
+    linear-gradient(145deg, #17434c 0%, #0c1c23 100%);
+  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 14%);
+}
+
+.dtm_brandCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dtm_brandTitle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.dtm_version {
+  color: var(--dsw-alias-label-tertiary, #999);
+  font-size: 10px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.dtm_path {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary, #999);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.dtm_headActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dtm_tabs {
+  flex: 0 0 100%;
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));
+}
+
+.dtm_tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 25px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.dtm_tab:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_tab[data-active='true'] {
+  background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-base, #fff));
+  color: var(--dsw-alias-label-primary, #222);
+  box-shadow: 0 1px 1px rgb(0 0 0 / 7%), inset 0 0 0 0.5px var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));
+}
+
+.dtm_tab:focus-visible,
+.dtm_back:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));
+  outline-offset: 0;
+}
+
+.dtm_tab:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dtm_subBar {
+  flex: 0 0 100%;
+  display: flex;
+}
+
+.dtm_back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.dtm_back:hover:not(:disabled) {
+  background: var(--dtm-row-hover);
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_back:disabled {
+  opacity: 0.5;
+}
+
+.dtm_panelBody {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 14px 14px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%)) transparent;
+}
+
+.dtm_panelBody::-webkit-scrollbar {
+  width: 5px;
+}
+
+.dtm_panelBody::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%));
+}
+
+/* ---------------------------------------------------------------- 控件 */
+
+.dtm_iconButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #888);
+  cursor: pointer;
+}
+
+.dtm_iconButton:hover:not(:disabled) {
+  background: var(--dtm-row-hover);
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_iconButton:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dtm_iconButton:focus-visible,
+.dtm_button:focus-visible,
+.dtm_mode:focus-visible,
+.dtm_switch:focus-visible,
+.dtm_ack input:focus-visible,
+.dtm_input:focus-visible,
+.dtm_textarea:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));
+  outline-offset: 1px;
+}
+
+.dtm_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 29px;
+  padding: 0 12px;
+  border: 0.5px solid transparent;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.dtm_button[data-size='sm'] {
+  height: 25px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  border-radius: 7px;
+}
+
+.dtm_button[data-variant='primary'] {
+  background: var(--dtm-blue);
+  color: var(--dtm-on-accent);
+}
+
+.dtm_button[data-variant='primary']:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dtm-blue) 88%, #000);
+}
+
+.dtm_button[data-variant='danger'] {
+  background: var(--dtm-red);
+  color: #fff;
+}
+
+.dtm_button[data-variant='danger']:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dtm-red) 86%, #000);
+}
+
+.dtm_button[data-variant='ghost'] {
+  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #555);
+}
+
+.dtm_button[data-variant='ghost']:hover:not(:disabled) {
+  background: var(--dtm-row-hover);
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_button[data-variant='soft'] {
+  background: var(--dtm-row-hover);
+  color: var(--dsw-alias-label-primary, #222);
+}
+
+.dtm_button[data-variant='soft']:hover:not(:disabled) {
+  background: var(--dtm-soft);
+}
+
+.dtm_button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.dtm_button svg {
+  flex: none;
+}
+
+.dtm_spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 1.7px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: dtm_spin 0.8s linear infinite;
+  vertical-align: -2px;
+}
+
+.dtm_spin {
+  animation: dtm_spin 0.8s linear infinite;
+}
+
+@keyframes dtm_spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dtm_loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dsw-alias-label-tertiary, #888);
+}
+
+.dtm_state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 8px;
+}
+
+/* ---------------------------------------------------------------- 横幅 */
+
+.dtm_banners {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.dtm_banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 17px;
+}
+
+.dtm_bannerText {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dtm_banner[data-kind='info'] {
+  background: color-mix(in srgb, var(--dtm-blue) 10%, transparent);
+  color: var(--dsw-alias-label-secondary, #555);
+}
+
+.dtm_banner[data-kind='success'] {
+  background: color-mix(in srgb, var(--dtm-green) 12%, transparent);
+  color: var(--dtm-green);
+}
+
+.dtm_banner[data-kind='warning'] {
+  background: color-mix(in srgb, var(--dtm-amber) 13%, transparent);
+  color: var(--dtm-amber);
+}
+
+.dtm_banner[data-kind='error'] {
+  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);
+  color: var(--dtm-red);
+}
+
+.dtm_banner .dtm_button {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- 时间线 */
+
+.dtm_view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dtm_viewTitle {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dtm_viewHint {
+  margin: -2px 0 2px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 11.5px;
+}
+
+.dtm_list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dtm_row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));
+  border-radius: 10px;
+  background: transparent;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.dtm_row:hover {
+  background: var(--dtm-row-hover);
+  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));
+}
+
+.dtm_row[data-current='true'] {
+  background: color-mix(in srgb, var(--dtm-green) 5%, transparent);
+  border-color: color-mix(in srgb, var(--dtm-green) 22%, var(--dsw-alias-border-l1, transparent));
+}
+
+.dtm_rowDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dtm-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-blue) 12%, transparent);
+}
+
+.dtm_row[data-kind='manual'] .dtm_rowDot {
+  background: var(--dtm-teal);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-teal) 12%, transparent);
+}
+
+.dtm_row[data-kind='safety'] .dtm_rowDot {
+  background: var(--dtm-amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-amber) 14%, transparent);
+}
+
+.dtm_row[data-kind='restore'] .dtm_rowDot {
+  background: var(--dtm-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-green) 14%, transparent);
+}
+
+.dtm_rowBody {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dtm_rowTop {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dtm_rowTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.dtm_badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dtm-soft);
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 9.5px;
+  line-height: 15px;
+  font-weight: 500;
+}
+
+.dtm_badge[data-tone='current'] {
+  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);
+  color: var(--dtm-green);
+}
+
+.dtm_rowTime {
+  flex: none;
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary, #999);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dtm_rowMeta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.dtm_sep {
+  opacity: 0.55;
+}
+
+.dtm_rowId {
+  margin-left: 2px;
+  color: var(--dsw-alias-label-tertiary, #aaa);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  letter-spacing: -0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dtm_row .dtm_button {
+  flex: none;
+}
+
+.dtm_listFoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.dtm_listCount {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.dtm_listMore {
+  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #aaa));
+}
+
+.dtm_empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 26px 18px 22px;
+}
+
+.dtm_emptyIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 2px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--dtm-teal) 10%, transparent);
+  color: var(--dtm-teal);
+}
+
+.dtm_emptyTitle {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dtm_emptyBody {
+  max-width: 290px;
+  margin: 0 0 6px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 11.5px;
+  line-height: 17px;
+}
+
+/* ---------------------------------------------------------------- 恢复确认 */
+
+.dtm_target {
+  padding: 9px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));
+  border-radius: 10px;
+  background: var(--dtm-row-hover);
+}
+
+.dtm_targetTop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dtm_targetTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dtm_targetTime {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dtm_targetMeta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 1px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+}
+
+.dtm_sectionLabel {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.dtm_modes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dtm_mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.dtm_mode:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));
+  background: var(--dtm-row-hover);
+}
+
+.dtm_mode[data-selected='true'] {
+  border-color: color-mix(in srgb, var(--dtm-blue) 55%, transparent);
+  background: color-mix(in srgb, var(--dtm-blue) 6%, transparent);
+}
+
+.dtm_mode[data-mode='exact'][data-selected='true'] {
+  border-color: color-mix(in srgb, var(--dtm-red) 50%, transparent);
+  background: color-mix(in srgb, var(--dtm-red) 6%, transparent);
+}
+
+.dtm_mode:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dtm_modeRadio {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  border: 1.5px solid var(--dsw-alias-border-l3, rgb(0 0 0 / 25%));
+  border-radius: 50%;
+}
+
+.dtm_modeRadio > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dtm-blue);
+}
+
+.dtm_mode[data-mode='exact'] .dtm_modeRadio > span {
+  background: var(--dtm-red);
+}
+
+.dtm_modeCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.dtm_modeTitle {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.dtm_modeHint {
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.dtm_ack {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dtm-red) 8%, transparent);
+  color: var(--dtm-red);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.dtm_ack input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--dtm-red);
+  cursor: pointer;
+}
+
+.dtm_planState {
+  padding: 10px 2px;
+}
+
+.dtm_planSummary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+}
+
+.dtm_planStat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  background: var(--dtm-row-hover);
+}
+
+.dtm_planNumber {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dtm_planStat[data-tone='danger'] .dtm_planNumber {
+  color: var(--dtm-red);
+}
+
+.dtm_planStat[data-tone='muted'] .dtm_planNumber {
+  color: var(--dsw-alias-label-secondary, #666);
+  font-size: 13px;
+}
+
+.dtm_planLabel {
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10px;
+}
+
+.dtm_summaryLine {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary, #555);
+  font-size: 11px;
+}
+
+.dtm_sample {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dtm_sampleTitle {
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.dtm_sampleList {
+  max-height: 132px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--dtm-row-hover);
+}
+
+.dtm_sampleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 3px;
+  font-size: 10.5px;
+}
+
+.dtm_sampleBadge {
+  flex: none;
+  min-width: 30px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--dtm-blue) 12%, transparent);
+  color: var(--dtm-blue);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.dtm_sampleBadge[data-status='D'] {
+  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);
+  color: var(--dtm-red);
+}
+
+.dtm_samplePath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, #555);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+
+.dtm_sampleMore {
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10px;
+  padding-left: 3px;
+}
+
+.dtm_safetyNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.dtm_safetyNote svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--dtm-teal);
+}
+
+.dtm_actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+/* ---------------------------------------------------------------- 结果 */
+
+.dtm_result {
+  align-items: center;
+  text-align: center;
+  padding: 14px 6px 6px;
+}
+
+.dtm_resultIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);
+  color: var(--dtm-green);
+}
+
+.dtm_resultTitle {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dtm_resultSummary {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary, #555);
+  font-size: 11.5px;
+}
+
+.dtm_resultIds {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 100%;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 16px;
+  word-break: break-all;
+}
+
+.dtm_resultTarget {
+  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #999));
+  font-size: 10px;
+}
+
+.dtm_resultHint {
+  max-width: 340px;
+  margin: 2px 0 4px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.dtm_result .dtm_actions {
+  justify-content: center;
+  width: 100%;
+}
+
+/* ---------------------------------------------------------------- 设置 */
+
+.dtm_settings {
+  gap: 2px;
+}
+
+.dtm_field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));
+}
+
+.dtm_field:last-of-type {
+  border-bottom: 0;
+}
+
+.dtm_fieldCopy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dtm_fieldTitle {
+  color: var(--dsw-alias-label-primary, #1a1a1a);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.dtm_fieldHint {
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.dtm_fieldControl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dtm_fieldGroup {
+  display: flex;
+  flex-direction: column;
+  padding-left: 8px;
+  border-left: 1.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));
+  margin-left: 1px;
+}
+
+.dtm_fieldGroup[data-disabled='true'] {
+  opacity: 0.55;
+}
+
+.dtm_fieldBlock {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.dtm_input {
+  box-sizing: border-box;
+  width: 88px;
+  height: 26px;
+  padding: 0 7px;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-base, transparent);
+  color: var(--dsw-alias-label-primary, #222);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dtm_textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  padding: 7px 8px;
+  resize: vertical;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base, transparent);
+  color: var(--dsw-alias-label-secondary, #555);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.dtm_switch {
+  box-sizing: border-box;
+  position: relative;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l3, rgb(0 0 0 / 22%));
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.dtm_switch[data-on='true'] {
+  background: var(--dtm-green);
+}
+
+.dtm_switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dtm_switchThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--dsw-alias-switch-thumb, #fff);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+  transition: transform 0.15s ease;
+}
+
+.dtm_switch[data-on='true'] .dtm_switchThumb {
+  transform: translateX(14px);
+}
+
+/* ---------------------------------------------------------------- 窄屏 */
+
+@media (max-width: 760px) {
+  .dtm_triggerText {
+    display: none;
+  }
+
+  .dtm_trigger {
+    width: 24px;
+    padding: 0;
+    justify-content: center;
+    border-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dtm_spinner,
+  .dtm_spin {
+    animation-duration: 2s;
+  }
+
+  .dtm_trigger,
+  .dtm_button,
+  .dtm_row,
+  .dtm_switch,
+  .dtm_switchThumb {
+    transition: none;
+  }
+}
