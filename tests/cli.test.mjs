@@ -52,6 +52,10 @@ test('CLI：snapshot → list → 拒绝未确认恢复 → --yes 恢复', { ski
   assert.match(listed.stdout, /共 2 个还原点/)
   assert.match(listed.stdout, /first|second/)
 
+  const badLimit = run(['list', '--workspace', ws, '--limit', 'not-a-number'], env)
+  assert.equal(badLimit.status, 0, badLimit.stderr)
+  assert.match(badLimit.stdout, /first|second/)
+
   const workspaceDir = join(data, 'workspaces')
   const metadataFile = (await readdir(workspaceDir)).find((file) => file.endsWith('.json'))
   assert.ok(metadataFile)

@@ -101,6 +101,10 @@ export const zh = {
   'error.sessionBusy': '会话正在运行，请先停止当前轮次。',
   'error.gitUnavailable': '宿主上没有可用的 git，时光机不可用。',
   'error.sessionUnsupported': '当前会话不支持时光机（需要顶层会话与工作目录）。',
+  'error.nothingToRestore': '当前工作区已经与这个还原点一致（按所选模式），无需恢复。',
+  'error.planExpired': '恢复计划已过期，请重新预览。',
+  'error.planNotFound': '恢复计划不存在或已失效，请重新预览。',
+  'error.checkpointNotFound': '找不到这个还原点，或它的快照对象已经被清理。',
 
   'global.justNow': '刚刚',
   'global.secondsAgo': '{count} 秒前',
@@ -213,6 +217,10 @@ export const en = {
   'error.sessionBusy': 'The session is running. Stop the current turn first.',
   'error.gitUnavailable': 'No usable git on the host; Time Machine is unavailable.',
   'error.sessionUnsupported': 'This session does not support Time Machine (a top-level session with a working directory is required).',
+  'error.nothingToRestore': 'The workspace already matches this checkpoint for the selected mode; nothing to restore.',
+  'error.planExpired': 'The restore plan expired. Preview the restore again.',
+  'error.planNotFound': 'The restore plan no longer exists. Preview the restore again.',
+  'error.checkpointNotFound': 'This checkpoint is missing, or its snapshot objects were already pruned.',
 
   'global.justNow': 'just now',
   'global.secondsAgo': '{count}s ago',

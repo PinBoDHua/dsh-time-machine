@@ -59,6 +59,8 @@ test('格式化：时间、统计、类型标签', () => {
   assert.equal(format.formatTurn(entry, t), '第 3 轮')
   assert.equal(format.shortCheckpointId(entry.id), '120000-abcd')
   assert.equal(format.formatKind({ ...entry, kind: 'safety', label: '恢复前安全点' }, t), '恢复前安全点')
+  assert.match(format.statusMessage({ code: 'NOTHING_TO_RESTORE' }, t), /已经与这个还原点一致/)
+  assert.match(format.statusMessage({ code: 'PLAN_EXPIRED' }, t), /重新预览/)
 })
 
 test('设置草稿与提交载荷互转', () => {

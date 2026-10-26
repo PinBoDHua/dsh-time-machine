@@ -9,8 +9,9 @@ import { GitRunner } from '../lib/git.js'
 import { createBinding } from '../lib/git.js'
 import { ConfigStore, normalizeConfig } from '../lib/config.js'
 import { TimeMachineEngine } from '../lib/engine.js'
-import { snapshotTree, ensureShadowRepo } from '../lib/git.js'
-import { insidePath } from '../lib/util.js'
+import { snapshotTree, ensureShadowRepo, treeEntries } from '../lib/git.js'
+import { CheckpointStore } from '../lib/store.js'
+import { insidePath, makeCheckpointId, nowIso } from '../lib/util.js'
 
 const quietLogger = { info() {}, warn() {}, debug() {} }
 
@@ -55,7 +56,7 @@ async function world(t, { repo = false, subdir = false, files = {}, gitignore = 
   await configStore.load()
   const git = new GitRunner()
   const binding = await createBinding({ cwd, dataDir: data, git })
-  const engine = new TimeMachineEngine({ binding, configStore, git, logger, version: '0.1.0' })
+  const engine = new TimeMachineEngine({ binding, configStore, git, logger, version: '0.2.0' })
   await engine.init()
   t.after(async () => {
     await engine.dispose()
@@ -194,7 +195,7 @@ async function failingWorld(t, failure = { failFrom: 2 }) {
     configStore: w.configStore,
     git,
     logger: quietLogger,
-    version: '0.1.0',
+    version: '0.2.0',
   })
   await engine.init()
   t.after(async () => {
@@ -234,6 +235,9 @@ testWithGit('回滚失败会保留恢复日志，可用新引擎 recover', async
   await writeFile(join(w.cwd, 'c.txt'), 'two\n')
   await w.engine.manualSnapshot('s', 'second')
   const before = await readFile(join(w.cwd, 'a.txt'), 'utf8')
+  // 先让面板轮询读一次空日志；回滚失败后 journal 不能被 listJournals 的 2 秒
+  // 缓存遮住，否则面板会在最关键的时候显示“没有未完成的恢复日志”。
+  await w.engine.status('s')
   const plan = await w.engine.planRestore({ sessionId: 's', checkpointId: first.checkpoint.id, mode: 'overwrite' })
   // 第二次 blob 读取失败，回滚里的读取也全部失败。
   await assert.rejects(
@@ -250,7 +254,7 @@ testWithGit('回滚失败会保留恢复日志，可用新引擎 recover', async
     configStore: w.configStore,
     git: new GitRunner(),
     logger: quietLogger,
-    version: '0.1.0',
+    version: '0.2.0',
   })
   await engine.init()
   t.after(async () => {
@@ -299,6 +303,22 @@ testWithGit('保留策略删除旧还原点引用', async (t) => {
   assert.equal(status.total, 10)
   const refs = execFileSync('git', ['--git-dir', w.binding.gitDir, 'for-each-ref', '--format=%(refname)', 'refs/time-machine/checkpoints'], {
     cwd: w.binding.shadowDir,
+    encoding: 'utf8',
+  }).trim().split('\n').filter(Boolean)
+  assert.equal(refs.length, 10)
+})
+
+testWithGit('自动 gc 按累计淘汰数触发，稳态下不会无限堆积对象', async (t) => {
+  const w = await world(t, { files: { 'a.txt': '0\n' } })
+  await w.configStore.update({ maxCheckpoints: 10, maxAgeDays: 365 })
+  for (let index = 0; index < 20; index += 1) {
+    await writeFile(join(w.cwd, 'a.txt'), `${index}\n`)
+    await w.engine.manualSnapshot('s', `s${index}`)
+  }
+  // 第 20 个还原点淘汰了第 10 个旧引用，gc 已排进串行链；再排一个空任务等它完成。
+  await w.engine.enqueue(async () => {})
+  assert.equal(typeof w.engine.store.get().lastGcAt, 'string')
+  const refs = execFileSync('git', ['--git-dir', w.binding.gitDir, 'for-each-ref', '--format=%(refname)', 'refs/time-machine/checkpoints'], {
     encoding: 'utf8',
   }).trim().split('\n').filter(Boolean)
   assert.equal(refs.length, 10)
@@ -358,4 +378,112 @@ testWithGit('快照不写入用户仓库且会自动排除 node_modules', async 
     encoding: 'utf8',
   })
   assert.equal(userObjectsAfter, userObjectsBefore)
+})
+
+testWithGit('数据目录位于工作区内时会自动排除，不会快照自己', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-self-'))
+  const cwd = join(root, 'ws')
+  const dataDir = join(cwd, '.tm-data')
+  await mkdir(cwd, { recursive: true })
+  await writeFile(join(cwd, 'a.txt'), 'one\n')
+  const configStore = new ConfigStore({ dataDir, logger: quietLogger })
+  await configStore.load()
+  const git = new GitRunner()
+  const binding = await createBinding({ cwd, dataDir, git })
+  const engine = new TimeMachineEngine({ binding, configStore, git, logger: quietLogger, version: 'test' })
+  await engine.init()
+  t.after(async () => {
+    await engine.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const first = await engine.manualSnapshot('s', 'one')
+  const record = engine.store.find(first.checkpoint.id)
+  const entries = await treeEntries(binding, { git, commit: record.commit })
+  assert.deepEqual([...entries.keys()], ['a.txt'])
+
+  // 绑定文件每次快照都会刷新 seenAt；如果数据目录没被排除，这里会多出
+  // .tm-data 下的文件并把“无变化”的轮次也记成新还原点。
+  await writeFile(join(cwd, 'a.txt'), 'two\n')
+  const second = await engine.checkpoint({ sessionId: 's', kind: 'auto', phase: 'after' })
+  assert.equal(second.checkpoint.stats.files, 1)
+})
+
+testWithGit('还原点标签会截断到 80 字符并清除控制字符', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  const label = `${'x'.repeat(70)}\n\t${'y'.repeat(50)}`
+  const { checkpoint } = await w.engine.manualSnapshot('s', label)
+  assert.equal(checkpoint.label.length, 80)
+  assert.ok(!/[\u0000-\u001f\u007f]/u.test(checkpoint.label))
+  assert.equal(w.engine.store.find(checkpoint.id).label, checkpoint.label)
+})
+
+testWithGit('排除规则始终保护 .git 与插件数据目录', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  await mkdir(join(w.cwd, '.dsh-time-machine'), { recursive: true })
+  await writeFile(join(w.cwd, '.dsh-time-machine', 'marker.txt'), 'marker\n')
+  await w.configStore.update({ excludes: ['*', '!.dsh-time-machine/', '!a.txt'] })
+  const { checkpoint } = await w.engine.manualSnapshot('s', 'excludes')
+  const record = w.engine.store.find(checkpoint.id)
+  const entries = await treeEntries(w.binding, { git: w.git, commit: record.commit })
+  assert.deepEqual([...entries.keys()], ['a.txt'])
+})
+
+testWithGit('init 失败后下一次调用会重新加载，而不是永久 rejected', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  const engine = new TimeMachineEngine({
+    binding: w.binding,
+    configStore: w.configStore,
+    git: w.git,
+    logger: quietLogger,
+    version: 'test',
+  })
+  t.after(async () => {
+    await engine.dispose()
+  })
+  const original = engine.store.load.bind(engine.store)
+  let calls = 0
+  engine.store.load = async () => {
+    calls += 1
+    if (calls === 1) throw new Error('transient metadata failure')
+    return original()
+  }
+  await assert.rejects(() => engine.init(), /transient metadata failure/)
+  await engine.init()
+  assert.equal(calls, 2)
+  assert.equal(engine.store.loaded, true)
+})
+
+test('元数据写盘失败时 append 回滚内存状态', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-store-'))
+  try {
+    const binding = {
+      workspacePath: root,
+      workTree: root,
+      prefix: '',
+      dataDir: root,
+      metadataFile: join(root, 'workspaces', 'key.json'),
+    }
+    const store = new CheckpointStore({ binding, logger: quietLogger })
+    await store.load()
+    store.save = async () => {
+      throw new Error('disk full')
+    }
+    const checkpoint = {
+      id: makeCheckpointId(),
+      kind: 'manual',
+      phase: 'after',
+      sessionId: 's',
+      createdAt: nowIso(),
+      commit: 'a'.repeat(40),
+      tree: 'b'.repeat(40),
+      stats: { files: 1, added: 0, deleted: 0 },
+    }
+    await assert.rejects(() => store.append(checkpoint), /disk full/)
+    assert.deepEqual(store.list(), [])
+    assert.equal(store.get().lastCheckpointId, undefined)
+    assert.equal(store.get().lastTree, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

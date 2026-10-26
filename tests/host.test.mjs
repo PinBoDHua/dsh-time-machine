@@ -182,6 +182,17 @@ test('宿主接线：自动快照、面板接口、恢复与安全校验', async
   }))
   assert.equal(noKey.status, 403)
 
+  // 所有写接口都必须在解析 body 之前拒绝缺少控制密钥的请求。
+  for (const [route, body] of [
+    [checkpointRoute, { sessionId: 's-home', label: 'nope' }],
+    [planRoute, { sessionId: 's-home', checkpointId: first.id, mode: 'overwrite' }],
+    [restoreRoute, { sessionId: 's-home', planId: 'p-20261025-120000-abcdef', confirm: 'RESTORE' }],
+    [configRoute, { config: { auto: false } }],
+  ]) {
+    const denied = await respond(route.handler, request(route.path, { method: 'POST', body }))
+    assert.equal(denied.status, 403, `${route.path} should require the control key`)
+  }
+
   const plan = await respond(planRoute.handler, request('/plugins/dsh-time-machine/plan', {
     method: 'POST',
     key: status.body.key,
@@ -214,6 +225,14 @@ test('宿主接线：自动快照、面板接口、恢复与安全校验', async
   }))
   assert.equal(manifest.status, 200)
   assert.equal(manifest.body.checkpoint.label, 'manual from panel')
+
+  const longLabel = await respond(checkpointRoute.handler, request('/plugins/dsh-time-machine/checkpoint', {
+    method: 'POST',
+    key: status.body.key,
+    body: { sessionId: 's-home', label: 'L'.repeat(200) },
+  }))
+  assert.equal(longLabel.status, 200)
+  assert.equal(longLabel.body.checkpoint.label.length, 80)
 
   const command = fake.commands[0]
   const listed = await command.handler({

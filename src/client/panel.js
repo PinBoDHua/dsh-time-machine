@@ -685,13 +685,10 @@ export function TimeMachineAction(props) {
   const position = useAnchorPosition(triggerRef, open)
   const refreshSeq = React.useRef(0)
   const planSeq = React.useRef(0)
-  const viewRef = React.useRef(view)
-  viewRef.current = view
   const locale = activeLocale()
 
   const refresh = React.useCallback(async (options = {}) => {
     if (sessionId === undefined || sessionId === null || sessionId === '') return
-    if (options.quiet === true && viewRef.current !== 'timeline') return
     const seq = refreshSeq.current + 1
     refreshSeq.current = seq
     if (options.quiet !== true) setLoading(true)
@@ -709,6 +706,11 @@ export function TimeMachineAction(props) {
   }, [api, sessionId])
 
   React.useEffect(() => {
+    // 会话切换：让仍在路上的 status/plan 请求失效，避免旧会话的响应写回新面板。
+    refreshSeq.current += 1
+    planSeq.current += 1
+    setLoading(false)
+    setPlanning(false)
     setOpen(false)
     setStatus(null)
     setError(null)

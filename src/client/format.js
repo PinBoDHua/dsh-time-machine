@@ -101,5 +101,9 @@ export function statusMessage(error, t) {
   if (code === 'SESSION_BUSY') return t('error.sessionBusy')
   if (code === 'GIT_UNAVAILABLE') return t('error.gitUnavailable')
   if (code === 'SESSION_UNSUPPORTED') return t('error.sessionUnsupported')
+  if (code === 'NOTHING_TO_RESTORE') return t('error.nothingToRestore')
+  if (code === 'PLAN_EXPIRED') return t('error.planExpired')
+  if (code === 'PLAN_NOT_FOUND') return t('error.planNotFound')
+  if (code === 'CHECKPOINT_NOT_FOUND') return t('error.checkpointNotFound')
   return error?.message ?? String(error)
 }

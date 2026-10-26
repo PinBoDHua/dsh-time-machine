@@ -259,7 +259,7 @@ node lib/bin.js recover --workspace <dir> --plan <planId> --yes
 | `auto` | `true` | 总开关；关闭后不自动记录，手动/恢复仍可用 |
 | `beforeTurn` | `true` | 轮前快照 |
 | `afterTurn` | `true` | 轮后快照 |
-| `maxCheckpoints` | `120` | 每个工作区保留数量（最少 5，最多 1000） |
+| `maxCheckpoints` | `120` | 每个工作区保留数量（最少 10，最多 1000） |
 | `maxAgeDays` | `14` | 超过天数的旧还原点进入清理 |
 | `timeoutMs` | `30000` | 单条快照 Git 命令超时 |
 | `restoreTimeoutMs` | `120000` | 恢复/回滚命令超时 |
@@ -278,7 +278,9 @@ node lib/bin.js recover --workspace <dir> --plan <planId> --yes
 
 - **对话不倒退**：恢复只作用于文件；会话上下文仍保留旧内容。继续前让 Agent 重新读取文件，或新开一轮说明。后续版本才考虑会话分叉。
 - **忽略文件不在快照里**：`.gitignore` 与 `excludes` 命中的文件永远不会被记录或恢复；它们的当前内容不会被修改。
+- **强制排除项优先**：`.git/` 与插件数据目录始终排在用户规则之后，`!` 否定规则也无法把它们重新纳入；`DSH_TIME_MACHINE_DATA_DIR` 指到工作区内时，该目录会按真实相对路径自动排除，避免影子仓库快照自己。
 - **子模块/嵌套仓库**：按 gitlink 记录，内部内容不纳入；恢复时跳过并在计划中警告。
+- **目录与文件互换**：若还原点里某路径是文件、当前是目录（或相反），计划会以目录冲突拒绝，不做递归删除或隐式覆盖；请先手动腾挪，再重新预览。
 - **符号链接**：POSIX 上支持；Windows 上含符号链接写入/删除的计划会被拒绝（回滚安全性优先）。
 - **工作区外**：不会碰会话工作目录之外的任何文件，即使它们属于同一个 Git 仓库。
 - **大文件**：默认单文件恢复上限 64 MiB；超过时整次计划拒绝，不做部分截断。
@@ -318,7 +320,7 @@ node scripts/install.mjs --uninstall --apply  # 执行
 
 ## 开发与验证
 
-设计取舍见 [docs/DESIGN.md](docs/DESIGN.md)，本次端到端验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+设计取舍见 [docs/DESIGN.md](docs/DESIGN.md)；0.2.0 的审计与回归记录见 [docs/AUDIT-0.2.0.md](docs/AUDIT-0.2.0.md)，0.1.0 的真实宿主端到端验证见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 ```bash
 node scripts/build.mjs          # 构建 client/client.js
@@ -338,8 +340,9 @@ node verify/capture.mjs         # 生成文档截图（docs/images）
 - 回滚失败保留 journal 并由新引擎 recover；
 - 工具在自己的轮次内恢复、其他会话运行时拒绝；
 - 保留策略、大小写重命名、路径逃逸、配置归一化；
+- 工作区内数据目录自动排除、强制排除优先级、标签清洗、元数据写盘失败回滚、`init` 重试、journal 缓存失效、自动 gc 触发；
 - Host 事件/命令/工具/HTTP 接口接线与鉴权；
-- CLI 快照/列表/恢复的确认门槛；
+- CLI 快照/列表/恢复的确认门槛、非法参数与不可用工作区容错；
 - 客户端 bundle 契约、中英文键集、设置草稿、离线视觉截图。
 
 ## 路线图

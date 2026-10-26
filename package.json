@@ -1,6 +1,6 @@
 {
   "name": "dsh-time-machine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "时光机 —— 为 DeepSeek Harness 的每一次对话自动留下工作区还原点：影子 Git 持久快照、逐轮记录、影响预览、覆盖/精确回滚，回滚前自动再存安全点，失败自动回滚。不碰用户仓库、不删除忽略文件，让 Agent 的改动从「事后检查」变成「随时可退」。",
   "type": "module",
   "main": "lib/index.js",
