@@ -1,17 +1,18 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { GitRunner } from '../lib/git.js'
+import { GitRunner, readBlob } from '../lib/git.js'
 import { createBinding } from '../lib/git.js'
 import { ConfigStore, normalizeConfig } from '../lib/config.js'
 import { TimeMachineEngine } from '../lib/engine.js'
-import { snapshotTree, ensureShadowRepo, treeEntries } from '../lib/git.js'
+import { snapshotTree, ensureShadowRepo, treeEntries, updateRef, resolveRef } from '../lib/git.js'
 import { CheckpointStore } from '../lib/store.js'
-import { insidePath, makeCheckpointId, nowIso } from '../lib/util.js'
+import { applyEntries } from '../lib/restore.js'
+import { insidePath, makeCheckpointId, makePlanId, nowIso } from '../lib/util.js'
 
 const quietLogger = { info() {}, warn() {}, debug() {} }
 
@@ -56,7 +57,7 @@ async function world(t, { repo = false, subdir = false, files = {}, gitignore = 
   await configStore.load()
   const git = new GitRunner()
   const binding = await createBinding({ cwd, dataDir: data, git })
-  const engine = new TimeMachineEngine({ binding, configStore, git, logger, version: '0.2.0' })
+  const engine = new TimeMachineEngine({ binding, configStore, git, logger, version: '0.3.0' })
   await engine.init()
   t.after(async () => {
     await engine.dispose()
@@ -195,7 +196,7 @@ async function failingWorld(t, failure = { failFrom: 2 }) {
     configStore: w.configStore,
     git,
     logger: quietLogger,
-    version: '0.2.0',
+    version: '0.3.0',
   })
   await engine.init()
   t.after(async () => {
@@ -254,7 +255,7 @@ testWithGit('回滚失败会保留恢复日志，可用新引擎 recover', async
     configStore: w.configStore,
     git: new GitRunner(),
     logger: quietLogger,
-    version: '0.2.0',
+    version: '0.3.0',
   })
   await engine.init()
   t.after(async () => {
@@ -329,6 +330,10 @@ test('路径安全：拒绝逃逸、绝对路径与 .git', () => {
   assert.throws(() => insidePath('C:\\ws', 'C:/x'), /absolute path/)
   assert.throws(() => insidePath('C:\\ws', '.git/config'), /\.git/)
   assert.equal(insidePath('C:\\ws', 'a/b.txt'), 'C:\\ws\\a\\b.txt')
+  if (process.platform === 'win32') {
+    assert.throws(() => insidePath('C:\\ws', '.git./config'), /\.git/)
+    assert.throws(() => insidePath('C:\\ws', 'CON'), /device/)
+  }
 })
 
 test('配置归一化：越界收敛、排除项清洗、非法类型保留默认', () => {
@@ -483,6 +488,198 @@ test('元数据写盘失败时 append 回滚内存状态', async () => {
     assert.deepEqual(store.list(), [])
     assert.equal(store.get().lastCheckpointId, undefined)
     assert.equal(store.get().lastTree, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+testWithGit('新增排除规则后，已缓存的文件不再进入新快照', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n', 'secret.txt': 'secret\n' }, gitignore: null })
+  const first = await w.engine.manualSnapshot('s', 'before exclude')
+  const firstEntries = await treeEntries(w.binding, { git: w.git, commit: w.engine.store.find(first.checkpoint.id).commit })
+  assert.ok(firstEntries.has('secret.txt'))
+
+  await w.configStore.update({ excludes: ['.git/', 'node_modules/', '.dsh-time-machine/', 'secret.txt'] })
+  const second = await w.engine.manualSnapshot('s', 'after exclude')
+  const secondEntries = await treeEntries(w.binding, { git: w.git, commit: w.engine.store.find(second.checkpoint.id).commit })
+  assert.deepEqual([...secondEntries.keys()], ['a.txt'])
+
+  // 即使内容继续变化，也不能再被写进新快照。
+  await writeFile(join(w.cwd, 'secret.txt'), 'secret changed\n')
+  const third = await w.engine.manualSnapshot('s', 'exclude still active')
+  const thirdEntries = await treeEntries(w.binding, { git: w.git, commit: w.engine.store.find(third.checkpoint.id).commit })
+  assert.deepEqual([...thirdEntries.keys()], ['a.txt'])
+})
+
+testWithGit('恢复旧快照时跳过后来才被排除的文件', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'one\n', 'secret.txt': 's1\n' }, gitignore: null })
+  const first = await w.engine.manualSnapshot('s', 'before secret exclude')
+  await w.configStore.update({ excludes: ['.git/', 'node_modules/', '.dsh-time-machine/', 'secret.txt'] })
+  await writeFile(join(w.cwd, 'a.txt'), 'two\n')
+  await writeFile(join(w.cwd, 'secret.txt'), 's2\n')
+
+  const plan = await w.engine.planRestore({ sessionId: 's', checkpointId: first.checkpoint.id, mode: 'overwrite' })
+  assert.ok(plan.warnings.some((warning) => warning.includes('排除规则')))
+  assert.ok(plan.sample.every((entry) => entry.path !== 'secret.txt'))
+  await w.engine.applyRestore({ sessionId: 's', planId: plan.planId, confirm: 'RESTORE' })
+  assert.equal(await readFile(join(w.cwd, 'a.txt'), 'utf8'), 'one\n')
+  assert.equal(await readFile(join(w.cwd, 'secret.txt'), 'utf8'), 's2\n')
+})
+
+testWithGit('工作区 .gitattributes 的 ident 不会改写快照字节', async (t) => {
+  const original = '$Id: abc123 $\n没有结尾换行的行'
+  const w = await world(t, { files: { 'a.txt': original } })
+  await writeFile(join(w.cwd, '.gitattributes'), '*.txt ident\n')
+  const { checkpoint } = await w.engine.manualSnapshot('s', 'ident')
+  const record = w.engine.store.find(checkpoint.id)
+  const entries = await treeEntries(w.binding, { git: w.git, commit: record.commit })
+  const blob = await readBlob(w.binding, { git: w.git, oid: entries.get('a.txt').oid, maxBytes: 1024 })
+  assert.deepEqual(blob, Buffer.from(original, 'utf8'))
+})
+
+test('删除计划遇到父目录符号链接时拒绝，且不碰链接外文件', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-link-'))
+  const ws = join(root, 'ws')
+  const outside = join(root, 'outside')
+  await mkdir(ws, { recursive: true })
+  await mkdir(outside, { recursive: true })
+  await writeFile(join(outside, 'victim.txt'), 'keep\n')
+  await symlink(outside, join(ws, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
+  try {
+    const binding = { workspacePath: ws, workTree: ws, prefix: '' }
+    await assert.rejects(
+      () => applyEntries({
+        binding,
+        entries: [{ path: 'link/victim.txt', status: 'D', mode: '100644', oid: 'a'.repeat(40), size: 5 }],
+        maxFileBytes: 1024,
+      }),
+      (error) => error.code === 'UNSAFE_PATH',
+    )
+    assert.equal(await readFile(join(outside, 'victim.txt'), 'utf8'), 'keep\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('数据目录等于快照根时拒绝绑定，避免影子仓库快照自己', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-equal-'))
+  const ws = join(root, 'ws')
+  await mkdir(ws, { recursive: true })
+  try {
+    await assert.rejects(
+      () => createBinding({ cwd: ws, dataDir: ws, git: new GitRunner() }),
+      (error) => error.code === 'BAD_DATA_DIR',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('配置索引加载上限与 maxCheckpoints 上限一致（1000）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-limit-'))
+  try {
+    const metadataFile = join(root, 'workspaces', 'key.json')
+    await mkdir(join(root, 'workspaces'), { recursive: true })
+    const checkpoints = []
+    for (let index = 0; index < 600; index += 1) {
+      checkpoints.push({
+        id: `20260101-000000-${index.toString(16).padStart(4, '0')}`,
+        kind: 'auto',
+        phase: 'after',
+        sessionId: 's',
+        turn: index,
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+        commit: 'a'.repeat(40),
+        tree: 'b'.repeat(40),
+        stats: { files: 0, added: 0, deleted: 0 },
+      })
+    }
+    await writeFile(metadataFile, JSON.stringify({ version: 1, checkpoints }))
+    const store = new CheckpointStore({
+      binding: { dataDir: root, metadataFile, workspacePath: root, workTree: root, prefix: '' },
+      logger: quietLogger,
+    })
+    await store.load()
+    assert.equal(store.get().checkpoints.length, 600)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+testWithGit('恢复日志的 planId 不允许路径穿越', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  const checkpoint = (await w.engine.manualSnapshot('s', 'journal')).checkpoint
+  const record = w.engine.store.find(checkpoint.id)
+  const victim = join(w.binding.repoDir, 'victim.json')
+  await writeFile(victim, 'keep\n')
+  await writeFile(join(w.binding.journalDir, 'evil.json'), JSON.stringify({
+    version: 1,
+    planId: '../victim',
+    sessionId: 's',
+    createdAt: nowIso(),
+    safetyId: checkpoint.id,
+    safetyCommit: record.commit,
+    safetyTree: record.tree,
+    targetId: checkpoint.id,
+    targetCommit: record.commit,
+    targetTree: record.tree,
+    mode: 'overwrite',
+    entries: [],
+  }))
+  await assert.rejects(
+    () => w.engine.recoverJournal('../victim'),
+    (error) => error.code === 'BAD_REQUEST',
+  )
+  assert.equal(await readFile(victim, 'utf8'), 'keep\n')
+  assert.deepEqual(await w.engine.listJournals(), [])
+})
+
+testWithGit('会话运行中拒绝执行 journal 回滚', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  await w.engine.startTurn('s', 1)
+  await assert.rejects(
+    () => w.engine.recoverJournal('p-20260101-000000-abcdef'),
+    (error) => error.code === 'SESSION_BUSY',
+  )
+  await w.engine.stopping('s', 1)
+  w.engine.endTurn('s', 1)
+})
+
+testWithGit('启动时只清理已过期的 plan 引用，保留仍在宽限期内的计划', async (t) => {
+  const w = await world(t, { files: { 'a.txt': 'a\n' } })
+  const checkpoint = (await w.engine.manualSnapshot('s', 'plan refs')).checkpoint
+  const record = w.engine.store.find(checkpoint.id)
+  const oldPlan = 'p-20200101-000000-abcdef'
+  const currentPlan = makePlanId()
+  await updateRef(w.binding, { git: w.git, ref: `refs/time-machine/plans/${oldPlan}`, commit: record.commit })
+  await updateRef(w.binding, { git: w.git, ref: `refs/time-machine/plans/${currentPlan}`, commit: record.commit })
+
+  const engine = new TimeMachineEngine({
+    binding: w.binding,
+    configStore: w.configStore,
+    git: w.git,
+    logger: quietLogger,
+    version: 'test',
+  })
+  await engine.init()
+  t.after(async () => {
+    await engine.dispose()
+  })
+  assert.equal(await resolveRef(w.binding, { git: w.git, ref: `refs/time-machine/plans/${oldPlan}` }), undefined)
+  assert.equal(await resolveRef(w.binding, { git: w.git, ref: `refs/time-machine/plans/${currentPlan}` }), record.commit)
+})
+
+test('配置更新写盘失败时不提交内存状态；非法 excludes 不会清空原规则', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-config-'))
+  const { config, issues } = normalizeConfig({ excludes: null })
+  assert.deepEqual(config.excludes, ['.git/', 'node_modules/', '.dsh-time-machine/'])
+  assert.ok(issues.length > 0)
+  try {
+    const store = new ConfigStore({ dataDir: root, logger: quietLogger })
+    await store.load()
+    await mkdir(join(root, 'settings.json'))
+    await assert.rejects(() => store.update({ auto: false }))
+    assert.equal(store.get().auto, true)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

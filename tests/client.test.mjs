@@ -61,6 +61,8 @@ test('格式化：时间、统计、类型标签', () => {
   assert.equal(format.formatKind({ ...entry, kind: 'safety', label: '恢复前安全点' }, t), '恢复前安全点')
   assert.match(format.statusMessage({ code: 'NOTHING_TO_RESTORE' }, t), /已经与这个还原点一致/)
   assert.match(format.statusMessage({ code: 'PLAN_EXPIRED' }, t), /重新预览/)
+  assert.match(format.statusMessage({ code: 'RESTORE_ROLLED_BACK', details: { cause: 'injected' } }, t), /自动回滚/)
+  assert.match(format.statusMessage({ code: 'TIMEOUT' }, t), /请求超时/)
 })
 
 test('设置草稿与提交载荷互转', () => {
@@ -68,19 +70,28 @@ test('设置草稿与提交载荷互转', () => {
     auto: false,
     beforeTurn: true,
     afterTurn: false,
+    autoGc: false,
     maxCheckpoints: 66,
     maxAgeDays: 7,
     timeoutMs: 15000,
+    restoreTimeoutMs: 90000,
+    maxRestoreFileBytes: 128 * 1024 * 1024,
     excludes: ['.git/', 'node_modules/'],
   })
   assert.equal(draft.auto, false)
+  assert.equal(draft.autoGc, false)
   assert.equal(draft.maxCheckpoints, '66')
+  assert.equal(draft.restoreTimeoutMs, '90000')
+  assert.equal(draft.maxRestoreFileMiB, '128')
   assert.equal(draft.excludesText, '.git/\nnode_modules/')
   const payload = settings.settingsPayloadOf({ ...draft, excludesText: '\n.git/\nnode_modules/\n# comment\n' })
   assert.equal(payload.auto, false)
   assert.equal(payload.beforeTurn, true)
   assert.equal(payload.afterTurn, false)
+  assert.equal(payload.autoGc, false)
   assert.equal(payload.maxCheckpoints, 66)
+  assert.equal(payload.restoreTimeoutMs, 90000)
+  assert.equal(payload.maxRestoreFileBytes, 128 * 1024 * 1024)
   assert.deepEqual(payload.excludes, ['.git/', 'node_modules/'])
 })
 

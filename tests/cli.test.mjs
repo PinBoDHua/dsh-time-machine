@@ -82,3 +82,32 @@ test('CLI：snapshot → list → 拒绝未确认恢复 → --yes 恢复', { ski
   assert.match(doctor.stdout, /还原点 [1-9]/)
   assert.ok(existsSync(join(data, 'repos')))
 })
+
+test('CLI doctor：元数据里的坏记录不会让命令崩溃', { skip: gitOk() ? false : 'git unavailable' }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-doctor-'))
+  const ws = join(root, 'ws')
+  const data = join(root, 'data')
+  await mkdir(ws, { recursive: true })
+  await mkdir(join(data, 'workspaces'), { recursive: true })
+  await writeFile(join(ws, 'a.txt'), 'a\n')
+  await writeFile(join(data, 'workspaces', 'key.json'), JSON.stringify({
+    version: 1,
+    workspacePath: ws,
+    workTree: ws,
+    prefix: '',
+    checkpoints: [{
+      id: '20260101-000000-0000',
+      kind: 'auto',
+      phase: 'after',
+      sessionId: 's',
+      createdAt: new Date().toISOString(),
+      stats: { files: 1, added: 0, deleted: 0 },
+    }],
+  }))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const doctor = run(['doctor'], { DSH_TIME_MACHINE_DATA_DIR: data })
+  assert.equal(doctor.status, 0, doctor.stderr)
+  assert.match(doctor.stdout, /无效记录 1/)
+})

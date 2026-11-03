@@ -626,6 +626,7 @@ export function TimeMachinePanel(props) {
       role: 'dialog',
       'aria-label': t('panel.title'),
       'aria-modal': 'false',
+      tabIndex: -1,
       'data-view': view,
       style: position ?? undefined,
     },
@@ -737,6 +738,23 @@ export function TimeMachineAction(props) {
       clearInterval(timer)
     }
   }, [open, refresh])
+
+  React.useEffect(() => {
+    if (open !== true || typeof document === 'undefined') return undefined
+    const previouslyFocused = document.activeElement
+    const focusPanel = () => {
+      panelRef.current?.focus?.({ preventScroll: true })
+    }
+    const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(focusPanel) : (focusPanel(), undefined)
+    return () => {
+      if (frame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
+      // 面板是 portal 出来的非模态 dialog；关闭后把焦点还给触发按钮，
+      // 键盘用户不会掉回 document.body。
+      if (previouslyFocused !== null && typeof previouslyFocused?.focus === 'function') {
+        previouslyFocused.focus({ preventScroll: true })
+      }
+    }
+  }, [open])
 
   React.useEffect(() => {
     if (open !== true) return undefined
@@ -862,6 +880,8 @@ export function TimeMachineAction(props) {
 
   const backToTimeline = () => {
     if (restoring) return
+    planSeq.current += 1
+    setPlanning(false)
     setView('timeline')
     setSelected(null)
     setPlan(null)
@@ -873,6 +893,7 @@ export function TimeMachineAction(props) {
   }
 
   const toggleOpen = () => {
+    if (open) planSeq.current += 1
     if (!open) {
       setView('timeline')
       setSelected(null)

@@ -105,5 +105,15 @@ export function statusMessage(error, t) {
   if (code === 'PLAN_EXPIRED') return t('error.planExpired')
   if (code === 'PLAN_NOT_FOUND') return t('error.planNotFound')
   if (code === 'CHECKPOINT_NOT_FOUND') return t('error.checkpointNotFound')
+  if (code === 'RESTORE_ROLLED_BACK') {
+    return t('error.restoreRolledBack', { message: error?.details?.cause ?? error?.message ?? '' })
+  }
+  if (code === 'ROLLBACK_FAILED') {
+    return t('error.rollbackFailed', { message: error?.details?.cause ?? error?.message ?? '' })
+  }
+  if (code === 'CONFIRM_REQUIRED') return t('error.confirmRequired')
+  if (code === 'TIMEOUT') return t('error.timeout')
+  if (code === 'NETWORK') return t('error.network', { message: error?.message ?? '' })
+  if (code === 'BAD_RESPONSE') return t('error.badResponse')
   return error?.message ?? String(error)
 }

@@ -166,12 +166,18 @@ const zh = {
   'panel.settings.autoHint': '关闭后不再自动创建还原点；手动快照和恢复仍然可用。',
   'panel.settings.before': '轮次开始前',
   'panel.settings.after': '轮次完成后',
+  'panel.settings.autoGc': '自动回收对象',
+  'panel.settings.autoGcHint': '清理旧还原点后偶尔运行 git gc，回收不能被引用的对象。',
   'panel.settings.max': '每个工作区保留',
   'panel.settings.maxUnit': '个还原点',
   'panel.settings.age': '最长保留',
   'panel.settings.ageUnit': '天',
   'panel.settings.timeout': '单次快照超时',
   'panel.settings.timeoutUnit': '毫秒',
+  'panel.settings.restoreTimeout': '恢复/回滚超时',
+  'panel.settings.restoreTimeoutUnit': '毫秒',
+  'panel.settings.maxRestoreSize': '单文件恢复上限',
+  'panel.settings.maxRestoreSizeUnit': 'MiB',
   'panel.settings.excludes': '额外排除',
   'panel.settings.excludesHint': '每行一个 gitignore 规则；默认排除 .git、node_modules 和插件数据目录。',
   'panel.settings.save': '保存',
@@ -192,6 +198,12 @@ const zh = {
   'error.planExpired': '恢复计划已过期，请重新预览。',
   'error.planNotFound': '恢复计划不存在或已失效，请重新预览。',
   'error.checkpointNotFound': '找不到这个还原点，或它的快照对象已经被清理。',
+  'error.restoreRolledBack': '恢复失败，已自动回滚到安全点。技术原因：{message}',
+  'error.rollbackFailed': '恢复失败，且自动回滚没有完成。请在终端运行 dsh-time-machine recover。技术原因：{message}',
+  'error.confirmRequired': '恢复需要确认短语 RESTORE。',
+  'error.timeout': '请求超时，宿主可能仍在处理；请稍后刷新状态再决定是否重试。',
+  'error.network': '无法连接宿主：{message}',
+  'error.badResponse': '宿主返回了无法解析的响应。',
 
   'global.justNow': '刚刚',
   'global.secondsAgo': '{count} 秒前',
@@ -282,12 +294,18 @@ const en = {
   'panel.settings.autoHint': 'Off disables automatic checkpoints; manual snapshots and restores still work.',
   'panel.settings.before': 'Before each turn',
   'panel.settings.after': 'After each turn',
+  'panel.settings.autoGc': 'Automatic object cleanup',
+  'panel.settings.autoGcHint': 'Occasionally run git gc after pruned checkpoints to reclaim unreachable objects.',
   'panel.settings.max': 'Keep per workspace',
   'panel.settings.maxUnit': 'checkpoints',
   'panel.settings.age': 'Retain for',
   'panel.settings.ageUnit': 'days',
   'panel.settings.timeout': 'Snapshot timeout',
   'panel.settings.timeoutUnit': 'ms',
+  'panel.settings.restoreTimeout': 'Restore/rollback timeout',
+  'panel.settings.restoreTimeoutUnit': 'ms',
+  'panel.settings.maxRestoreSize': 'Max file size to restore',
+  'panel.settings.maxRestoreSizeUnit': 'MiB',
   'panel.settings.excludes': 'Extra excludes',
   'panel.settings.excludesHint': 'One gitignore pattern per line; .git, node_modules and the plugin data directory are always excluded.',
   'panel.settings.save': 'Save',
@@ -308,6 +326,12 @@ const en = {
   'error.planExpired': 'The restore plan expired. Preview the restore again.',
   'error.planNotFound': 'The restore plan no longer exists. Preview the restore again.',
   'error.checkpointNotFound': 'This checkpoint is missing, or its snapshot objects were already pruned.',
+  'error.restoreRolledBack': 'Restore failed and was rolled back to the safety checkpoint. Technical cause: {message}',
+  'error.rollbackFailed': 'Restore failed and the automatic rollback did not finish. Run dsh-time-machine recover in a terminal. Technical cause: {message}',
+  'error.confirmRequired': 'Restoring requires the confirmation phrase RESTORE.',
+  'error.timeout': 'The request timed out; the host may still be working. Refresh the status before retrying.',
+  'error.network': 'Cannot reach the host: {message}',
+  'error.badResponse': 'The host returned an unreadable response.',
 
   'global.justNow': 'just now',
   'global.secondsAgo': '{count}s ago',
@@ -346,9 +370,8 @@ function createApi() {
     const headers = { Accept: 'application/json' }
     if (body !== undefined) headers['Content-Type'] = 'application/json'
     if (controlKey !== undefined) headers[CONTROL_HEADER] = controlKey
-    let response
     try {
-      response = await fetch(path, {
+      const response = await fetch(path, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -356,28 +379,31 @@ function createApi() {
         cache: 'no-store',
         credentials: 'same-origin',
       })
+      // 超时计时器必须覆盖 body 读取。否则服务器只回了响应头、body 卡住时，
+      // 这里的 promise 会永久挂起，restoring/saving 状态再也回不到 false。
+      const text = await response.text()
+      let payload
+      try {
+        payload = text === '' ? undefined : JSON.parse(text)
+      } catch {
+        throw new ApiError('BAD_RESPONSE', `宿主返回了非 JSON 响应（HTTP ${String(response.status)}）`, undefined, response.status)
+      }
+      if (payload?.key !== undefined) controlKey = payload.key
+      if (!response.ok || payload?.ok === false) {
+        const code = payload?.error?.code ?? `HTTP_${String(response.status)}`
+        const message = payload?.error?.message ?? response.statusText ?? '请求失败'
+        if (code === 'UNAUTHORIZED' || response.status === 403) controlKey = undefined
+        throw new ApiError(code, message, payload?.error?.details, response.status)
+      }
+      return payload
     } catch (error) {
-      clearTimeout(timer)
+      if (error instanceof ApiError) throw error
       if (controller.signal.aborted) throw new ApiError('TIMEOUT', '请求超时', undefined, undefined)
       if (signal?.aborted) throw new ApiError('ABORTED', '请求已取消', undefined, undefined)
       throw new ApiError('NETWORK', error instanceof Error ? error.message : String(error), undefined, undefined)
+    } finally {
+      clearTimeout(timer)
     }
-    clearTimeout(timer)
-    const text = await response.text()
-    let payload
-    try {
-      payload = text === '' ? undefined : JSON.parse(text)
-    } catch {
-      throw new ApiError('BAD_RESPONSE', `宿主返回了非 JSON 响应（HTTP ${String(response.status)}）`, undefined, response.status)
-    }
-    if (payload?.key !== undefined) controlKey = payload.key
-    if (!response.ok || payload?.ok === false) {
-      const code = payload?.error?.code ?? `HTTP_${String(response.status)}`
-      const message = payload?.error?.message ?? response.statusText ?? '请求失败'
-      if (code === 'UNAUTHORIZED' || response.status === 403) controlKey = undefined
-      throw new ApiError(code, message, payload?.error?.details, response.status)
-    }
-    return payload
   }
 
   return {
@@ -394,21 +420,24 @@ function createApi() {
       return send('POST', ROUTES.checkpoint, {
         body: { sessionId, label },
         signal,
-        timeoutMs: 60_000,
+        // 宿主端快照超时上限是 120s；客户端不能让一个合法的慢快照提前变成
+        // “请求超时”而服务器仍在写。留出 git 启动与元数据写入余量。
+        timeoutMs: 180_000,
       })
     },
     async plan(sessionId, checkpointId, mode, signal) {
       return send('POST', ROUTES.plan, {
         body: { sessionId, checkpointId, mode },
         signal,
-        timeoutMs: 120_000,
+        timeoutMs: 300_000,
       })
     },
     async restore(sessionId, planId, signal) {
       return send('POST', ROUTES.restore, {
         body: { sessionId, planId, confirm: CONFIRM_PHRASE },
         signal,
-        timeoutMs: 300_000,
+        // restore/rollback 各自可达 600s，再加一次快照与元数据写入。
+        timeoutMs: 900_000,
       })
     },
     async saveConfig(sessionId, config, signal) {
@@ -529,6 +558,16 @@ function statusMessage(error, t) {
   if (code === 'PLAN_EXPIRED') return t('error.planExpired')
   if (code === 'PLAN_NOT_FOUND') return t('error.planNotFound')
   if (code === 'CHECKPOINT_NOT_FOUND') return t('error.checkpointNotFound')
+  if (code === 'RESTORE_ROLLED_BACK') {
+    return t('error.restoreRolledBack', { message: error?.details?.cause ?? error?.message ?? '' })
+  }
+  if (code === 'ROLLBACK_FAILED') {
+    return t('error.rollbackFailed', { message: error?.details?.cause ?? error?.message ?? '' })
+  }
+  if (code === 'CONFIRM_REQUIRED') return t('error.confirmRequired')
+  if (code === 'TIMEOUT') return t('error.timeout')
+  if (code === 'NETWORK') return t('error.network', { message: error?.message ?? '' })
+  if (code === 'BAD_RESPONSE') return t('error.badResponse')
   return error?.message ?? String(error)
 }
 
@@ -687,9 +726,10 @@ function IconSpinner(props) {
 const h = React.createElement
 
 function DtmBanner(props) {
+  const kind = props.kind ?? 'info'
   return h(
     'div',
-    { className: 'dtm_banner', 'data-kind': props.kind ?? 'info', role: props.role ?? 'status' },
+    { className: 'dtm_banner', 'data-kind': kind, role: props.role ?? (kind === 'error' ? 'alert' : 'status') },
     h('span', { className: 'dtm_bannerText' }, props.children),
     props.action ?? null
   )
@@ -739,13 +779,17 @@ function DtmSpinner(props) {
 // ---- src/client/settings.js ----------------------------------
 function settingsDraftOf(settings) {
   const source = settings ?? DEFAULT_CONFIG
+  const maxRestoreBytes = source.maxRestoreFileBytes ?? DEFAULT_CONFIG.maxRestoreFileBytes
   return {
     auto: source.auto !== false,
     beforeTurn: source.beforeTurn !== false,
     afterTurn: source.afterTurn !== false,
+    autoGc: source.autoGc !== false,
     maxCheckpoints: String(source.maxCheckpoints ?? DEFAULT_CONFIG.maxCheckpoints),
     maxAgeDays: String(source.maxAgeDays ?? DEFAULT_CONFIG.maxAgeDays),
     timeoutMs: String(source.timeoutMs ?? DEFAULT_CONFIG.timeoutMs),
+    restoreTimeoutMs: String(source.restoreTimeoutMs ?? DEFAULT_CONFIG.restoreTimeoutMs),
+    maxRestoreFileMiB: String(Math.max(1, Math.round(Number(maxRestoreBytes) / (1024 * 1024)))),
     excludesText: Array.isArray(source.excludes) ? source.excludes.join('\n') : DEFAULT_CONFIG.excludes.join('\n'),
   }
 }
@@ -755,9 +799,12 @@ function settingsPayloadOf(draft) {
     auto: draft.auto === true,
     beforeTurn: draft.beforeTurn === true,
     afterTurn: draft.afterTurn === true,
+    autoGc: draft.autoGc === true,
     maxCheckpoints: Number(draft.maxCheckpoints),
     maxAgeDays: Number(draft.maxAgeDays),
     timeoutMs: Number(draft.timeoutMs),
+    restoreTimeoutMs: Number(draft.restoreTimeoutMs),
+    maxRestoreFileBytes: Math.round(Number(draft.maxRestoreFileMiB) * 1024 * 1024),
     excludes: String(draft.excludesText ?? '')
       .split('\n')
       .map((line) => line.trim())
@@ -869,6 +916,15 @@ function SettingsView(props) {
     ),
     h(
       DtmField,
+      { name: 'autogc', title: t('panel.settings.autoGc'), hint: t('panel.settings.autoGcHint') },
+      h(DtmSwitch, {
+        checked: draft.autoGc,
+        label: t('panel.settings.autoGc'),
+        onChange: (value) => onChange({ ...draft, autoGc: value }),
+      })
+    ),
+    h(
+      DtmField,
       { name: 'max', title: t('panel.settings.max'), hint: t('panel.settings.maxUnit') },
       h(DtmNumberInput, {
         value: draft.maxCheckpoints,
@@ -899,6 +955,29 @@ function SettingsView(props) {
         step: 1000,
         label: t('panel.settings.timeout'),
         onChange: (value) => onChange({ ...draft, timeoutMs: value }),
+      })
+    ),
+    h(
+      DtmField,
+      { name: 'restore-timeout', title: t('panel.settings.restoreTimeout'), hint: t('panel.settings.restoreTimeoutUnit') },
+      h(DtmNumberInput, {
+        value: draft.restoreTimeoutMs,
+        min: 10000,
+        max: 600000,
+        step: 1000,
+        label: t('panel.settings.restoreTimeout'),
+        onChange: (value) => onChange({ ...draft, restoreTimeoutMs: value }),
+      })
+    ),
+    h(
+      DtmField,
+      { name: 'max-restore-size', title: t('panel.settings.maxRestoreSize'), hint: t('panel.settings.maxRestoreSizeUnit') },
+      h(DtmNumberInput, {
+        value: draft.maxRestoreFileMiB,
+        min: 1,
+        max: 1024,
+        label: t('panel.settings.maxRestoreSize'),
+        onChange: (value) => onChange({ ...draft, maxRestoreFileMiB: value }),
       })
     ),
     h(
@@ -1538,6 +1617,7 @@ function TimeMachinePanel(props) {
       role: 'dialog',
       'aria-label': t('panel.title'),
       'aria-modal': 'false',
+      tabIndex: -1,
       'data-view': view,
       style: position ?? undefined,
     },
@@ -1649,6 +1729,23 @@ function TimeMachineAction(props) {
       clearInterval(timer)
     }
   }, [open, refresh])
+
+  React.useEffect(() => {
+    if (open !== true || typeof document === 'undefined') return undefined
+    const previouslyFocused = document.activeElement
+    const focusPanel = () => {
+      panelRef.current?.focus?.({ preventScroll: true })
+    }
+    const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(focusPanel) : (focusPanel(), undefined)
+    return () => {
+      if (frame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
+      // 面板是 portal 出来的非模态 dialog；关闭后把焦点还给触发按钮，
+      // 键盘用户不会掉回 document.body。
+      if (previouslyFocused !== null && typeof previouslyFocused?.focus === 'function') {
+        previouslyFocused.focus({ preventScroll: true })
+      }
+    }
+  }, [open])
 
   React.useEffect(() => {
     if (open !== true) return undefined
@@ -1774,6 +1871,8 @@ function TimeMachineAction(props) {
 
   const backToTimeline = () => {
     if (restoring) return
+    planSeq.current += 1
+    setPlanning(false)
     setView('timeline')
     setSelected(null)
     setPlan(null)
@@ -1785,6 +1884,7 @@ function TimeMachineAction(props) {
   }
 
   const toggleOpen = () => {
+    if (open) planSeq.current += 1
     if (!open) {
       setView('timeline')
       setSelected(null)
@@ -1881,7 +1981,7 @@ function TimeMachineAction(props) {
 /**
  * 本文件由 scripts/build.mjs 生成，请勿手工编辑。
  */
-const STYLES = "/*\n * 时光机 —— 与宿主同材质的面板。\n *\n * 入口是会话标题栏里的一个小胶囊，面板 portal 到 body。表面、阴影、边框与\n * 文字颜色全部读取宿主 --dsw-* 令牌，因此深浅色与字号设置自动跟随。\n */\n\n:root {\n  --dtm-blue: var(--dsw-alias-state-business-primary, #4176e6);\n  --dtm-teal: #1f9e99;\n  --dtm-amber: #c07a12;\n  --dtm-green: var(--dsw-alias-state-success-primary, #1f8f5f);\n  --dtm-red: var(--dsw-alias-state-error-primary, #d93a45);\n  --dtm-on-accent: #fff;\n  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));\n  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(0 0 0 / 6%));\n  --dtm-panel-fill: var(--dsw-specific-menu, #fff);\n  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 16px 40px rgb(0 0 0 / 18%));\n}\n\nbody[data-ds-dark-theme] {\n  --dtm-teal: #5ad7cf;\n  --dtm-amber: #e2a13c;\n  --dtm-green: #4bbf8b;\n  --dtm-red: #f06a6a;\n  --dtm-on-accent: #071116;\n  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(255 255 255 / 6%));\n  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(255 255 255 / 10%));\n  --dtm-panel-fill: var(--dsw-specific-menu, #1b1e22);\n  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(255 255 255 / 10%));\n  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 18px 48px rgb(0 0 0 / 55%));\n}\n\n.dtm_root {\n  display: inline-flex;\n  align-items: center;\n  flex: none;\n}\n\n.dtm_trigger {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  height: 24px;\n  padding: 0 8px;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n  border-radius: 999px;\n  background: transparent;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: inherit;\n  font-size: 12px;\n  line-height: 22px;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n\n.dtm_trigger:hover,\n.dtm_trigger[aria-expanded='true'] {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_trigger:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 1px;\n}\n\n.dtm_trigger svg {\n  flex: none;\n  color: var(--dtm-teal);\n}\n\n.dtm_triggerText {\n  font-weight: 500;\n  letter-spacing: 0.01em;\n}\n\n/* ---------------------------------------------------------------- 面板骨架 */\n\n.dtm_panel,\n.dtm_panel * {\n  box-sizing: border-box;\n}\n\n.dtm_panel {\n  position: fixed;\n  z-index: 1200;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  border: 0;\n  border-radius: var(--dsw-radius-lg, 14px);\n  background: var(--dtm-panel-fill);\n  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(20px));\n  --dsw-elevation-stroke-color: var(--dtm-panel-stroke);\n  box-shadow: var(--dtm-panel-shadow), inset 0 0 0 0.5px var(--dtm-panel-stroke);\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: inherit;\n  font-size: 12px;\n  line-height: 20px;\n  cursor: default;\n}\n\n.dtm_panelHead {\n  flex: none;\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 10px;\n  row-gap: 8px;\n  padding: 12px 14px 8px;\n}\n\n.dtm_brand {\n  display: flex;\n  align-items: center;\n  gap: 9px;\n  min-width: 0;\n  flex: 1 1 auto;\n}\n\n.dtm_brandIcon {\n  flex: none;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 32px;\n  height: 32px;\n  border-radius: 10px;\n  color: #d9fff8;\n  background:\n    radial-gradient(120% 120% at 20% 0%, rgb(141 232 212 / 38%) 0%, transparent 55%),\n    linear-gradient(145deg, #17434c 0%, #0c1c23 100%);\n  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 14%);\n}\n\n.dtm_brandCopy {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n}\n\n.dtm_brandTitle {\n  display: flex;\n  align-items: baseline;\n  gap: 6px;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13.5px;\n  font-weight: 600;\n  line-height: 18px;\n}\n\n.dtm_version {\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10px;\n  font-weight: 400;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_path {\n  max-width: 100%;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_headActions {\n  flex: none;\n  display: flex;\n  align-items: center;\n  gap: 2px;\n}\n\n.dtm_tabs {\n  flex: 0 0 100%;\n  display: flex;\n  gap: 3px;\n  padding: 3px;\n  border-radius: 9px;\n  background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));\n}\n\n.dtm_tab {\n  flex: 1 1 0;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  height: 25px;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: inherit;\n  font-size: 11.5px;\n  font-weight: 500;\n  cursor: pointer;\n}\n\n.dtm_tab:hover:not(:disabled) {\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_tab[data-active='true'] {\n  background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-base, #fff));\n  color: var(--dsw-alias-label-primary, #222);\n  box-shadow: 0 1px 1px rgb(0 0 0 / 7%), inset 0 0 0 0.5px var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n}\n\n.dtm_tab:focus-visible,\n.dtm_back:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 0;\n}\n\n.dtm_tab:disabled {\n  opacity: 0.5;\n  cursor: default;\n}\n\n.dtm_subBar {\n  flex: 0 0 100%;\n  display: flex;\n}\n\n.dtm_back {\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  height: 24px;\n  padding: 0 7px;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: inherit;\n  font-size: 11.5px;\n  cursor: pointer;\n}\n\n.dtm_back:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_back:disabled {\n  opacity: 0.5;\n}\n\n.dtm_panelBody {\n  min-height: 0;\n  overflow-y: auto;\n  overscroll-behavior: contain;\n  padding: 2px 14px 14px;\n  scrollbar-width: thin;\n  scrollbar-color: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%)) transparent;\n}\n\n.dtm_panelBody::-webkit-scrollbar {\n  width: 5px;\n}\n\n.dtm_panelBody::-webkit-scrollbar-thumb {\n  border-radius: 999px;\n  background: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%));\n}\n\n/* ---------------------------------------------------------------- 控件 */\n\n.dtm_iconButton {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 24px;\n  height: 24px;\n  padding: 0;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  cursor: pointer;\n}\n\n.dtm_iconButton:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_iconButton:disabled {\n  opacity: 0.45;\n  cursor: default;\n}\n\n.dtm_iconButton:focus-visible,\n.dtm_button:focus-visible,\n.dtm_mode:focus-visible,\n.dtm_switch:focus-visible,\n.dtm_ack input:focus-visible,\n.dtm_input:focus-visible,\n.dtm_textarea:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 1px;\n}\n\n.dtm_button {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  height: 29px;\n  padding: 0 12px;\n  border: 0.5px solid transparent;\n  border-radius: 8px;\n  font-family: inherit;\n  font-size: 12px;\n  font-weight: 500;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;\n}\n\n.dtm_button[data-size='sm'] {\n  height: 25px;\n  padding: 0 8px;\n  font-size: 11.5px;\n  border-radius: 7px;\n}\n\n.dtm_button[data-variant='primary'] {\n  background: var(--dtm-blue);\n  color: var(--dtm-on-accent);\n}\n\n.dtm_button[data-variant='primary']:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--dtm-blue) 88%, #000);\n}\n\n.dtm_button[data-variant='danger'] {\n  background: var(--dtm-red);\n  color: #fff;\n}\n\n.dtm_button[data-variant='danger']:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--dtm-red) 86%, #000);\n}\n\n.dtm_button[data-variant='ghost'] {\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n  background: transparent;\n  color: var(--dsw-alias-label-secondary, #555);\n}\n\n.dtm_button[data-variant='ghost']:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_button[data-variant='soft'] {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_button[data-variant='soft']:hover:not(:disabled) {\n  background: var(--dtm-soft);\n}\n\n.dtm_button:disabled {\n  opacity: 0.48;\n  cursor: default;\n}\n\n.dtm_button svg {\n  flex: none;\n}\n\n.dtm_spinner {\n  display: inline-block;\n  width: 13px;\n  height: 13px;\n  border: 1.7px solid color-mix(in srgb, currentColor 24%, transparent);\n  border-top-color: currentColor;\n  border-radius: 50%;\n  animation: dtm_spin 0.8s linear infinite;\n  vertical-align: -2px;\n}\n\n.dtm_spin {\n  animation: dtm_spin 0.8s linear infinite;\n}\n\n@keyframes dtm_spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n.dtm_loading {\n  display: inline-flex;\n  align-items: center;\n  gap: 7px;\n  color: var(--dsw-alias-label-tertiary, #888);\n}\n\n.dtm_state {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  gap: 10px;\n  padding: 28px 8px;\n}\n\n/* ---------------------------------------------------------------- 横幅 */\n\n.dtm_banners {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  margin-bottom: 10px;\n}\n\n.dtm_banner {\n  display: flex;\n  align-items: flex-start;\n  gap: 8px;\n  padding: 7px 9px;\n  border-radius: 8px;\n  font-size: 11.5px;\n  line-height: 17px;\n}\n\n.dtm_bannerText {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n\n.dtm_banner[data-kind='info'] {\n  background: color-mix(in srgb, var(--dtm-blue) 10%, transparent);\n  color: var(--dsw-alias-label-secondary, #555);\n}\n\n.dtm_banner[data-kind='success'] {\n  background: color-mix(in srgb, var(--dtm-green) 12%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_banner[data-kind='warning'] {\n  background: color-mix(in srgb, var(--dtm-amber) 13%, transparent);\n  color: var(--dtm-amber);\n}\n\n.dtm_banner[data-kind='error'] {\n  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);\n  color: var(--dtm-red);\n}\n\n.dtm_banner .dtm_button {\n  flex: none;\n}\n\n/* ---------------------------------------------------------------- 时间线 */\n\n.dtm_view {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n\n.dtm_viewTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13px;\n  font-weight: 600;\n}\n\n.dtm_viewHint {\n  margin: -2px 0 2px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11.5px;\n}\n\n.dtm_list {\n  display: flex;\n  flex-direction: column;\n  gap: 5px;\n}\n\n.dtm_row {\n  display: flex;\n  align-items: center;\n  gap: 9px;\n  padding: 8px 9px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n  border-radius: 10px;\n  background: transparent;\n  transition: background-color 0.14s ease, border-color 0.14s ease;\n}\n\n.dtm_row:hover {\n  background: var(--dtm-row-hover);\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n}\n\n.dtm_row[data-current='true'] {\n  background: color-mix(in srgb, var(--dtm-green) 5%, transparent);\n  border-color: color-mix(in srgb, var(--dtm-green) 22%, var(--dsw-alias-border-l1, transparent));\n}\n\n.dtm_rowDot {\n  flex: none;\n  width: 7px;\n  height: 7px;\n  border-radius: 50%;\n  background: var(--dtm-blue);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-blue) 12%, transparent);\n}\n\n.dtm_row[data-kind='manual'] .dtm_rowDot {\n  background: var(--dtm-teal);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-teal) 12%, transparent);\n}\n\n.dtm_row[data-kind='safety'] .dtm_rowDot {\n  background: var(--dtm-amber);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-amber) 14%, transparent);\n}\n\n.dtm_row[data-kind='restore'] .dtm_rowDot {\n  background: var(--dtm-green);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-green) 14%, transparent);\n}\n\n.dtm_rowBody {\n  flex: 1 1 auto;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n}\n\n.dtm_rowTop {\n  display: flex;\n  align-items: center;\n  gap: 5px;\n  min-width: 0;\n}\n\n.dtm_rowTitle {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 12.5px;\n  font-weight: 500;\n}\n\n.dtm_badge {\n  flex: none;\n  padding: 0 5px;\n  border-radius: 999px;\n  background: var(--dtm-soft);\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 9.5px;\n  line-height: 15px;\n  font-weight: 500;\n}\n\n.dtm_badge[data-tone='current'] {\n  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_rowTime {\n  flex: none;\n  margin-left: auto;\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10.5px;\n  font-variant-numeric: tabular-nums;\n  white-space: nowrap;\n}\n\n.dtm_rowMeta {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n  min-width: 0;\n  overflow: hidden;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  white-space: nowrap;\n}\n\n.dtm_sep {\n  opacity: 0.55;\n}\n\n.dtm_rowId {\n  margin-left: 2px;\n  color: var(--dsw-alias-label-tertiary, #aaa);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 9.5px;\n  letter-spacing: -0.02em;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n\n.dtm_row .dtm_button {\n  flex: none;\n}\n\n.dtm_listFoot {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  padding-top: 4px;\n}\n\n.dtm_listCount {\n  flex: 1 1 auto;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_listMore {\n  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #aaa));\n}\n\n.dtm_empty {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  text-align: center;\n  gap: 6px;\n  padding: 26px 18px 22px;\n}\n\n.dtm_emptyIcon {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 46px;\n  height: 46px;\n  margin-bottom: 2px;\n  border-radius: 14px;\n  background: color-mix(in srgb, var(--dtm-teal) 10%, transparent);\n  color: var(--dtm-teal);\n}\n\n.dtm_emptyTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13px;\n  font-weight: 600;\n}\n\n.dtm_emptyBody {\n  max-width: 290px;\n  margin: 0 0 6px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11.5px;\n  line-height: 17px;\n}\n\n/* ---------------------------------------------------------------- 恢复确认 */\n\n.dtm_target {\n  padding: 9px 10px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n  border-radius: 10px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_targetTop {\n  display: flex;\n  align-items: baseline;\n  gap: 8px;\n}\n\n.dtm_targetTitle {\n  flex: 1 1 auto;\n  min-width: 0;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 12.5px;\n  font-weight: 600;\n}\n\n.dtm_targetTime {\n  flex: none;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_targetMeta {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n  margin-top: 1px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n}\n\n.dtm_sectionLabel {\n  margin-top: 2px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  font-weight: 500;\n  letter-spacing: 0.02em;\n}\n\n.dtm_modes {\n  display: flex;\n  flex-direction: column;\n  gap: 5px;\n}\n\n.dtm_mode {\n  display: flex;\n  align-items: flex-start;\n  gap: 8px;\n  width: 100%;\n  padding: 8px 9px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  border-radius: 9px;\n  background: transparent;\n  text-align: left;\n  font-family: inherit;\n  color: inherit;\n  cursor: pointer;\n}\n\n.dtm_mode:hover:not(:disabled) {\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  background: var(--dtm-row-hover);\n}\n\n.dtm_mode[data-selected='true'] {\n  border-color: color-mix(in srgb, var(--dtm-blue) 55%, transparent);\n  background: color-mix(in srgb, var(--dtm-blue) 6%, transparent);\n}\n\n.dtm_mode[data-mode='exact'][data-selected='true'] {\n  border-color: color-mix(in srgb, var(--dtm-red) 50%, transparent);\n  background: color-mix(in srgb, var(--dtm-red) 6%, transparent);\n}\n\n.dtm_mode:disabled {\n  opacity: 0.6;\n  cursor: default;\n}\n\n.dtm_modeRadio {\n  flex: none;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 13px;\n  height: 13px;\n  margin-top: 2px;\n  border: 1.5px solid var(--dsw-alias-border-l3, rgb(0 0 0 / 25%));\n  border-radius: 50%;\n}\n\n.dtm_modeRadio > span {\n  width: 7px;\n  height: 7px;\n  border-radius: 50%;\n  background: var(--dtm-blue);\n}\n\n.dtm_mode[data-mode='exact'] .dtm_modeRadio > span {\n  background: var(--dtm-red);\n}\n\n.dtm_modeCopy {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  min-width: 0;\n}\n\n.dtm_modeTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 11.5px;\n  font-weight: 500;\n}\n\n.dtm_modeHint {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_ack {\n  display: flex;\n  align-items: center;\n  gap: 7px;\n  padding: 7px 9px;\n  border-radius: 8px;\n  background: color-mix(in srgb, var(--dtm-red) 8%, transparent);\n  color: var(--dtm-red);\n  font-size: 11px;\n  cursor: pointer;\n}\n\n.dtm_ack input {\n  width: 13px;\n  height: 13px;\n  accent-color: var(--dtm-red);\n  cursor: pointer;\n}\n\n.dtm_planState {\n  padding: 10px 2px;\n}\n\n.dtm_planSummary {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 5px;\n}\n\n.dtm_planStat {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  padding: 7px 8px;\n  border-radius: 9px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_planNumber {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 16px;\n  font-weight: 600;\n  line-height: 20px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_planStat[data-tone='danger'] .dtm_planNumber {\n  color: var(--dtm-red);\n}\n\n.dtm_planStat[data-tone='muted'] .dtm_planNumber {\n  color: var(--dsw-alias-label-secondary, #666);\n  font-size: 13px;\n}\n\n.dtm_planLabel {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n}\n\n.dtm_summaryLine {\n  margin: 0;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-size: 11px;\n}\n\n.dtm_sample {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n\n.dtm_sampleTitle {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n  font-weight: 500;\n}\n\n.dtm_sampleList {\n  max-height: 132px;\n  overflow-y: auto;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  padding: 3px;\n  border-radius: 8px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_sampleRow {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  min-width: 0;\n  padding: 1px 3px;\n  font-size: 10.5px;\n}\n\n.dtm_sampleBadge {\n  flex: none;\n  min-width: 30px;\n  padding: 0 4px;\n  border-radius: 5px;\n  background: color-mix(in srgb, var(--dtm-blue) 12%, transparent);\n  color: var(--dtm-blue);\n  font-size: 9px;\n  line-height: 14px;\n  text-align: center;\n}\n\n.dtm_sampleBadge[data-status='D'] {\n  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);\n  color: var(--dtm-red);\n}\n\n.dtm_samplePath {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10px;\n}\n\n.dtm_sampleMore {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n  padding-left: 3px;\n}\n\n.dtm_safetyNote {\n  display: flex;\n  align-items: flex-start;\n  gap: 6px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_safetyNote svg {\n  flex: none;\n  margin-top: 1px;\n  color: var(--dtm-teal);\n}\n\n.dtm_actions {\n  display: flex;\n  justify-content: flex-end;\n  gap: 6px;\n  padding-top: 4px;\n}\n\n/* ---------------------------------------------------------------- 结果 */\n\n.dtm_result {\n  align-items: center;\n  text-align: center;\n  padding: 14px 6px 6px;\n}\n\n.dtm_resultIcon {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 52px;\n  height: 52px;\n  border-radius: 50%;\n  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_resultTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 14px;\n  font-weight: 600;\n}\n\n.dtm_resultSummary {\n  margin: 0;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-size: 11.5px;\n}\n\n.dtm_resultIds {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  max-width: 100%;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10px;\n  line-height: 16px;\n  word-break: break-all;\n}\n\n.dtm_resultTarget {\n  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #999));\n  font-size: 10px;\n}\n\n.dtm_resultHint {\n  max-width: 340px;\n  margin: 2px 0 4px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11px;\n  line-height: 17px;\n}\n\n.dtm_result .dtm_actions {\n  justify-content: center;\n  width: 100%;\n}\n\n/* ---------------------------------------------------------------- 设置 */\n\n.dtm_settings {\n  gap: 2px;\n}\n\n.dtm_field {\n  display: flex;\n  align-items: center;\n  gap: 12px;\n  padding: 8px 0;\n  border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n}\n\n.dtm_field:last-of-type {\n  border-bottom: 0;\n}\n\n.dtm_fieldCopy {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n\n.dtm_fieldTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 11.5px;\n  font-weight: 500;\n}\n\n.dtm_fieldHint {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_fieldControl {\n  flex: none;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n}\n\n.dtm_fieldGroup {\n  display: flex;\n  flex-direction: column;\n  padding-left: 8px;\n  border-left: 1.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  margin-left: 1px;\n}\n\n.dtm_fieldGroup[data-disabled='true'] {\n  opacity: 0.55;\n}\n\n.dtm_fieldBlock {\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n}\n\n.dtm_input {\n  box-sizing: border-box;\n  width: 88px;\n  height: 26px;\n  padding: 0 7px;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  border-radius: 7px;\n  background: var(--dsw-alias-bg-base, transparent);\n  color: var(--dsw-alias-label-primary, #222);\n  font-family: inherit;\n  font-size: 11.5px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_textarea {\n  box-sizing: border-box;\n  width: 100%;\n  min-height: 88px;\n  padding: 7px 8px;\n  resize: vertical;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  border-radius: 8px;\n  background: var(--dsw-alias-bg-base, transparent);\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10.5px;\n  line-height: 16px;\n}\n\n.dtm_switch {\n  box-sizing: border-box;\n  position: relative;\n  width: 34px;\n  height: 20px;\n  padding: 0;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-border-l3, rgb(0 0 0 / 22%));\n  cursor: pointer;\n  transition: background-color 0.15s ease;\n}\n\n.dtm_switch[data-on='true'] {\n  background: var(--dtm-green);\n}\n\n.dtm_switch:disabled {\n  opacity: 0.5;\n  cursor: default;\n}\n\n.dtm_switchThumb {\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 16px;\n  height: 16px;\n  border-radius: 50%;\n  background: var(--dsw-alias-switch-thumb, #fff);\n  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);\n  transition: transform 0.15s ease;\n}\n\n.dtm_switch[data-on='true'] .dtm_switchThumb {\n  transform: translateX(14px);\n}\n\n/* ---------------------------------------------------------------- 窄屏 */\n\n@media (max-width: 760px) {\n  .dtm_triggerText {\n    display: none;\n  }\n\n  .dtm_trigger {\n    width: 24px;\n    padding: 0;\n    justify-content: center;\n    border-color: transparent;\n  }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  .dtm_spinner,\n  .dtm_spin {\n    animation-duration: 2s;\n  }\n\n  .dtm_trigger,\n  .dtm_button,\n  .dtm_row,\n  .dtm_switch,\n  .dtm_switchThumb {\n    transition: none;\n  }\n}\n"
+const STYLES = "/*\n * 时光机 —— 与宿主同材质的面板。\n *\n * 入口是会话标题栏里的一个小胶囊，面板 portal 到 body。表面、阴影、边框与\n * 文字颜色全部读取宿主 --dsw-* 令牌，因此深浅色与字号设置自动跟随。\n */\n\n:root {\n  --dtm-blue: var(--dsw-alias-state-business-primary, #4176e6);\n  --dtm-teal: #1f9e99;\n  --dtm-amber: #c07a12;\n  --dtm-green: var(--dsw-alias-state-success-primary, #1f8f5f);\n  --dtm-red: var(--dsw-alias-state-error-primary, #d93a45);\n  --dtm-on-accent: #fff;\n  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));\n  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(0 0 0 / 6%));\n  --dtm-panel-fill: var(--dsw-specific-menu, #fff);\n  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 16px 40px rgb(0 0 0 / 18%));\n}\n\nbody[data-ds-dark-theme] {\n  --dtm-teal: #5ad7cf;\n  --dtm-amber: #e2a13c;\n  --dtm-green: #4bbf8b;\n  --dtm-red: #f06a6a;\n  --dtm-on-accent: #071116;\n  --dtm-row-hover: var(--dsw-alias-interactive-bg-hover, rgb(255 255 255 / 6%));\n  --dtm-soft: var(--dsw-alias-interactive-bg-hover-solid, rgb(255 255 255 / 10%));\n  --dtm-panel-fill: var(--dsw-specific-menu, #1b1e22);\n  --dtm-panel-stroke: var(--dsw-alias-border-l1, rgb(255 255 255 / 10%));\n  --dtm-panel-shadow: var(--dsw-elevation-prominent, 0 18px 48px rgb(0 0 0 / 55%));\n}\n\n.dtm_root {\n  display: inline-flex;\n  align-items: center;\n  flex: none;\n}\n\n.dtm_trigger {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  height: 24px;\n  padding: 0 8px;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n  border-radius: 999px;\n  background: transparent;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: inherit;\n  font-size: 12px;\n  line-height: 22px;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n\n.dtm_trigger:hover,\n.dtm_trigger[aria-expanded='true'] {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_trigger:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 1px;\n}\n\n.dtm_trigger svg {\n  flex: none;\n  color: var(--dtm-teal);\n}\n\n.dtm_triggerText {\n  font-weight: 500;\n  letter-spacing: 0.01em;\n}\n\n/* ---------------------------------------------------------------- 面板骨架 */\n\n.dtm_panel,\n.dtm_panel * {\n  box-sizing: border-box;\n}\n\n.dtm_panel {\n  position: fixed;\n  z-index: 1200;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  border: 0;\n  border-radius: var(--dsw-radius-lg, 14px);\n  background: var(--dtm-panel-fill);\n  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(20px));\n  --dsw-elevation-stroke-color: var(--dtm-panel-stroke);\n  box-shadow: var(--dtm-panel-shadow), inset 0 0 0 0.5px var(--dtm-panel-stroke);\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: inherit;\n  font-size: 12px;\n  line-height: 20px;\n  cursor: default;\n}\n\n.dtm_panel:focus {\n  outline: none;\n}\n\n.dtm_panelHead {\n  flex: none;\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 10px;\n  row-gap: 8px;\n  padding: 12px 14px 8px;\n}\n\n.dtm_brand {\n  display: flex;\n  align-items: center;\n  gap: 9px;\n  min-width: 0;\n  flex: 1 1 auto;\n}\n\n.dtm_brandIcon {\n  flex: none;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 32px;\n  height: 32px;\n  border-radius: 10px;\n  color: #d9fff8;\n  background:\n    radial-gradient(120% 120% at 20% 0%, rgb(141 232 212 / 38%) 0%, transparent 55%),\n    linear-gradient(145deg, #17434c 0%, #0c1c23 100%);\n  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 14%);\n}\n\n.dtm_brandCopy {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n}\n\n.dtm_brandTitle {\n  display: flex;\n  align-items: baseline;\n  gap: 6px;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13.5px;\n  font-weight: 600;\n  line-height: 18px;\n}\n\n.dtm_version {\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10px;\n  font-weight: 400;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_path {\n  max-width: 100%;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_headActions {\n  flex: none;\n  display: flex;\n  align-items: center;\n  gap: 2px;\n}\n\n.dtm_tabs {\n  flex: 0 0 100%;\n  display: flex;\n  gap: 3px;\n  padding: 3px;\n  border-radius: 9px;\n  background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / 4%));\n}\n\n.dtm_tab {\n  flex: 1 1 0;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  height: 25px;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: inherit;\n  font-size: 11.5px;\n  font-weight: 500;\n  cursor: pointer;\n}\n\n.dtm_tab:hover:not(:disabled) {\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_tab[data-active='true'] {\n  background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-base, #fff));\n  color: var(--dsw-alias-label-primary, #222);\n  box-shadow: 0 1px 1px rgb(0 0 0 / 7%), inset 0 0 0 0.5px var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n}\n\n.dtm_tab:focus-visible,\n.dtm_back:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 0;\n}\n\n.dtm_tab:disabled {\n  opacity: 0.5;\n  cursor: default;\n}\n\n.dtm_subBar {\n  flex: 0 0 100%;\n  display: flex;\n}\n\n.dtm_back {\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  height: 24px;\n  padding: 0 7px;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: inherit;\n  font-size: 11.5px;\n  cursor: pointer;\n}\n\n.dtm_back:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_back:disabled {\n  opacity: 0.5;\n}\n\n.dtm_panelBody {\n  min-height: 0;\n  overflow-y: auto;\n  overscroll-behavior: contain;\n  padding: 2px 14px 14px;\n  scrollbar-width: thin;\n  scrollbar-color: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%)) transparent;\n}\n\n.dtm_panelBody::-webkit-scrollbar {\n  width: 5px;\n}\n\n.dtm_panelBody::-webkit-scrollbar-thumb {\n  border-radius: 999px;\n  background: var(--dsw-alias-scrollbar-thumb, rgb(0 0 0 / 20%));\n}\n\n/* ---------------------------------------------------------------- 控件 */\n\n.dtm_iconButton {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 24px;\n  height: 24px;\n  padding: 0;\n  border: 0;\n  border-radius: 7px;\n  background: transparent;\n  color: var(--dsw-alias-label-tertiary, #888);\n  cursor: pointer;\n}\n\n.dtm_iconButton:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_iconButton:disabled {\n  opacity: 0.45;\n  cursor: default;\n}\n\n.dtm_iconButton:focus-visible,\n.dtm_button:focus-visible,\n.dtm_mode:focus-visible,\n.dtm_switch:focus-visible,\n.dtm_ack input:focus-visible,\n.dtm_input:focus-visible,\n.dtm_textarea:focus-visible {\n  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6));\n  outline-offset: 1px;\n}\n\n.dtm_button {\n  box-sizing: border-box;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  height: 29px;\n  padding: 0 12px;\n  border: 0.5px solid transparent;\n  border-radius: 8px;\n  font-family: inherit;\n  font-size: 12px;\n  font-weight: 500;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;\n}\n\n.dtm_button[data-size='sm'] {\n  height: 25px;\n  padding: 0 8px;\n  font-size: 11.5px;\n  border-radius: 7px;\n}\n\n.dtm_button[data-variant='primary'] {\n  background: var(--dtm-blue);\n  color: var(--dtm-on-accent);\n}\n\n.dtm_button[data-variant='primary']:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--dtm-blue) 88%, #000);\n}\n\n.dtm_button[data-variant='danger'] {\n  background: var(--dtm-red);\n  color: #fff;\n}\n\n.dtm_button[data-variant='danger']:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--dtm-red) 86%, #000);\n}\n\n.dtm_button[data-variant='ghost'] {\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n  background: transparent;\n  color: var(--dsw-alias-label-secondary, #555);\n}\n\n.dtm_button[data-variant='ghost']:hover:not(:disabled) {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_button[data-variant='soft'] {\n  background: var(--dtm-row-hover);\n  color: var(--dsw-alias-label-primary, #222);\n}\n\n.dtm_button[data-variant='soft']:hover:not(:disabled) {\n  background: var(--dtm-soft);\n}\n\n.dtm_button:disabled {\n  opacity: 0.48;\n  cursor: default;\n}\n\n.dtm_button svg {\n  flex: none;\n}\n\n.dtm_spinner {\n  display: inline-block;\n  width: 13px;\n  height: 13px;\n  border: 1.7px solid color-mix(in srgb, currentColor 24%, transparent);\n  border-top-color: currentColor;\n  border-radius: 50%;\n  animation: dtm_spin 0.8s linear infinite;\n  vertical-align: -2px;\n}\n\n.dtm_spin {\n  animation: dtm_spin 0.8s linear infinite;\n}\n\n@keyframes dtm_spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n.dtm_loading {\n  display: inline-flex;\n  align-items: center;\n  gap: 7px;\n  color: var(--dsw-alias-label-tertiary, #888);\n}\n\n.dtm_state {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  gap: 10px;\n  padding: 28px 8px;\n}\n\n/* ---------------------------------------------------------------- 横幅 */\n\n.dtm_banners {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  margin-bottom: 10px;\n}\n\n.dtm_banner {\n  display: flex;\n  align-items: flex-start;\n  gap: 8px;\n  padding: 7px 9px;\n  border-radius: 8px;\n  font-size: 11.5px;\n  line-height: 17px;\n}\n\n.dtm_bannerText {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n\n.dtm_banner[data-kind='info'] {\n  background: color-mix(in srgb, var(--dtm-blue) 10%, transparent);\n  color: var(--dsw-alias-label-secondary, #555);\n}\n\n.dtm_banner[data-kind='success'] {\n  background: color-mix(in srgb, var(--dtm-green) 12%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_banner[data-kind='warning'] {\n  background: color-mix(in srgb, var(--dtm-amber) 13%, transparent);\n  color: var(--dtm-amber);\n}\n\n.dtm_banner[data-kind='error'] {\n  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);\n  color: var(--dtm-red);\n}\n\n.dtm_banner .dtm_button {\n  flex: none;\n}\n\n/* ---------------------------------------------------------------- 时间线 */\n\n.dtm_view {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n\n.dtm_viewTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13px;\n  font-weight: 600;\n}\n\n.dtm_viewHint {\n  margin: -2px 0 2px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11.5px;\n}\n\n.dtm_list {\n  display: flex;\n  flex-direction: column;\n  gap: 5px;\n}\n\n.dtm_row {\n  display: flex;\n  align-items: center;\n  gap: 9px;\n  padding: 8px 9px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n  border-radius: 10px;\n  background: transparent;\n  transition: background-color 0.14s ease, border-color 0.14s ease;\n}\n\n.dtm_row:hover {\n  background: var(--dtm-row-hover);\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 12%));\n}\n\n.dtm_row[data-current='true'] {\n  background: color-mix(in srgb, var(--dtm-green) 5%, transparent);\n  border-color: color-mix(in srgb, var(--dtm-green) 22%, var(--dsw-alias-border-l1, transparent));\n}\n\n.dtm_rowDot {\n  flex: none;\n  width: 7px;\n  height: 7px;\n  border-radius: 50%;\n  background: var(--dtm-blue);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-blue) 12%, transparent);\n}\n\n.dtm_row[data-kind='manual'] .dtm_rowDot {\n  background: var(--dtm-teal);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-teal) 12%, transparent);\n}\n\n.dtm_row[data-kind='safety'] .dtm_rowDot {\n  background: var(--dtm-amber);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-amber) 14%, transparent);\n}\n\n.dtm_row[data-kind='restore'] .dtm_rowDot {\n  background: var(--dtm-green);\n  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dtm-green) 14%, transparent);\n}\n\n.dtm_rowBody {\n  flex: 1 1 auto;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n}\n\n.dtm_rowTop {\n  display: flex;\n  align-items: center;\n  gap: 5px;\n  min-width: 0;\n}\n\n.dtm_rowTitle {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 12.5px;\n  font-weight: 500;\n}\n\n.dtm_badge {\n  flex: none;\n  padding: 0 5px;\n  border-radius: 999px;\n  background: var(--dtm-soft);\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 9.5px;\n  line-height: 15px;\n  font-weight: 500;\n}\n\n.dtm_badge[data-tone='current'] {\n  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_rowTime {\n  flex: none;\n  margin-left: auto;\n  color: var(--dsw-alias-label-tertiary, #999);\n  font-size: 10.5px;\n  font-variant-numeric: tabular-nums;\n  white-space: nowrap;\n}\n\n.dtm_rowMeta {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n  min-width: 0;\n  overflow: hidden;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  white-space: nowrap;\n}\n\n.dtm_sep {\n  opacity: 0.55;\n}\n\n.dtm_rowId {\n  margin-left: 2px;\n  color: var(--dsw-alias-label-tertiary, #aaa);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 9.5px;\n  letter-spacing: -0.02em;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n\n.dtm_row .dtm_button {\n  flex: none;\n}\n\n.dtm_listFoot {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  padding-top: 4px;\n}\n\n.dtm_listCount {\n  flex: 1 1 auto;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_listMore {\n  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #aaa));\n}\n\n.dtm_empty {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  text-align: center;\n  gap: 6px;\n  padding: 26px 18px 22px;\n}\n\n.dtm_emptyIcon {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 46px;\n  height: 46px;\n  margin-bottom: 2px;\n  border-radius: 14px;\n  background: color-mix(in srgb, var(--dtm-teal) 10%, transparent);\n  color: var(--dtm-teal);\n}\n\n.dtm_emptyTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 13px;\n  font-weight: 600;\n}\n\n.dtm_emptyBody {\n  max-width: 290px;\n  margin: 0 0 6px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11.5px;\n  line-height: 17px;\n}\n\n/* ---------------------------------------------------------------- 恢复确认 */\n\n.dtm_target {\n  padding: 9px 10px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n  border-radius: 10px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_targetTop {\n  display: flex;\n  align-items: baseline;\n  gap: 8px;\n}\n\n.dtm_targetTitle {\n  flex: 1 1 auto;\n  min-width: 0;\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 12.5px;\n  font-weight: 600;\n}\n\n.dtm_targetTime {\n  flex: none;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_targetMeta {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n  margin-top: 1px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n}\n\n.dtm_sectionLabel {\n  margin-top: 2px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  font-weight: 500;\n  letter-spacing: 0.02em;\n}\n\n.dtm_modes {\n  display: flex;\n  flex-direction: column;\n  gap: 5px;\n}\n\n.dtm_mode {\n  display: flex;\n  align-items: flex-start;\n  gap: 8px;\n  width: 100%;\n  padding: 8px 9px;\n  border: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  border-radius: 9px;\n  background: transparent;\n  text-align: left;\n  font-family: inherit;\n  color: inherit;\n  cursor: pointer;\n}\n\n.dtm_mode:hover:not(:disabled) {\n  border-color: var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  background: var(--dtm-row-hover);\n}\n\n.dtm_mode[data-selected='true'] {\n  border-color: color-mix(in srgb, var(--dtm-blue) 55%, transparent);\n  background: color-mix(in srgb, var(--dtm-blue) 6%, transparent);\n}\n\n.dtm_mode[data-mode='exact'][data-selected='true'] {\n  border-color: color-mix(in srgb, var(--dtm-red) 50%, transparent);\n  background: color-mix(in srgb, var(--dtm-red) 6%, transparent);\n}\n\n.dtm_mode:disabled {\n  opacity: 0.6;\n  cursor: default;\n}\n\n.dtm_modeRadio {\n  flex: none;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 13px;\n  height: 13px;\n  margin-top: 2px;\n  border: 1.5px solid var(--dsw-alias-border-l3, rgb(0 0 0 / 25%));\n  border-radius: 50%;\n}\n\n.dtm_modeRadio > span {\n  width: 7px;\n  height: 7px;\n  border-radius: 50%;\n  background: var(--dtm-blue);\n}\n\n.dtm_mode[data-mode='exact'] .dtm_modeRadio > span {\n  background: var(--dtm-red);\n}\n\n.dtm_modeCopy {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  min-width: 0;\n}\n\n.dtm_modeTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 11.5px;\n  font-weight: 500;\n}\n\n.dtm_modeHint {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_ack {\n  display: flex;\n  align-items: center;\n  gap: 7px;\n  padding: 7px 9px;\n  border-radius: 8px;\n  background: color-mix(in srgb, var(--dtm-red) 8%, transparent);\n  color: var(--dtm-red);\n  font-size: 11px;\n  cursor: pointer;\n}\n\n.dtm_ack input {\n  width: 13px;\n  height: 13px;\n  accent-color: var(--dtm-red);\n  cursor: pointer;\n}\n\n.dtm_planState {\n  padding: 10px 2px;\n}\n\n.dtm_planSummary {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 5px;\n}\n\n.dtm_planStat {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  padding: 7px 8px;\n  border-radius: 9px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_planNumber {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 16px;\n  font-weight: 600;\n  line-height: 20px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_planStat[data-tone='danger'] .dtm_planNumber {\n  color: var(--dtm-red);\n}\n\n.dtm_planStat[data-tone='muted'] .dtm_planNumber {\n  color: var(--dsw-alias-label-secondary, #666);\n  font-size: 13px;\n}\n\n.dtm_planLabel {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n}\n\n.dtm_summaryLine {\n  margin: 0;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-size: 11px;\n}\n\n.dtm_sample {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n\n.dtm_sampleTitle {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n  font-weight: 500;\n}\n\n.dtm_sampleList {\n  max-height: 132px;\n  overflow-y: auto;\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  padding: 3px;\n  border-radius: 8px;\n  background: var(--dtm-row-hover);\n}\n\n.dtm_sampleRow {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  min-width: 0;\n  padding: 1px 3px;\n  font-size: 10.5px;\n}\n\n.dtm_sampleBadge {\n  flex: none;\n  min-width: 30px;\n  padding: 0 4px;\n  border-radius: 5px;\n  background: color-mix(in srgb, var(--dtm-blue) 12%, transparent);\n  color: var(--dtm-blue);\n  font-size: 9px;\n  line-height: 14px;\n  text-align: center;\n}\n\n.dtm_sampleBadge[data-status='D'] {\n  background: color-mix(in srgb, var(--dtm-red) 12%, transparent);\n  color: var(--dtm-red);\n}\n\n.dtm_samplePath {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10px;\n}\n\n.dtm_sampleMore {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10px;\n  padding-left: 3px;\n}\n\n.dtm_safetyNote {\n  display: flex;\n  align-items: flex-start;\n  gap: 6px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_safetyNote svg {\n  flex: none;\n  margin-top: 1px;\n  color: var(--dtm-teal);\n}\n\n.dtm_actions {\n  display: flex;\n  justify-content: flex-end;\n  gap: 6px;\n  padding-top: 4px;\n}\n\n/* ---------------------------------------------------------------- 结果 */\n\n.dtm_result {\n  align-items: center;\n  text-align: center;\n  padding: 14px 6px 6px;\n}\n\n.dtm_resultIcon {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 52px;\n  height: 52px;\n  border-radius: 50%;\n  background: color-mix(in srgb, var(--dtm-green) 14%, transparent);\n  color: var(--dtm-green);\n}\n\n.dtm_resultTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 14px;\n  font-weight: 600;\n}\n\n.dtm_resultSummary {\n  margin: 0;\n  color: var(--dsw-alias-label-secondary, #555);\n  font-size: 11.5px;\n}\n\n.dtm_resultIds {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  max-width: 100%;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10px;\n  line-height: 16px;\n  word-break: break-all;\n}\n\n.dtm_resultTarget {\n  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #999));\n  font-size: 10px;\n}\n\n.dtm_resultHint {\n  max-width: 340px;\n  margin: 2px 0 4px;\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 11px;\n  line-height: 17px;\n}\n\n.dtm_result .dtm_actions {\n  justify-content: center;\n  width: 100%;\n}\n\n/* ---------------------------------------------------------------- 设置 */\n\n.dtm_settings {\n  gap: 2px;\n}\n\n.dtm_field {\n  display: flex;\n  align-items: center;\n  gap: 12px;\n  padding: 8px 0;\n  border-bottom: 0.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 7%));\n}\n\n.dtm_field:last-of-type {\n  border-bottom: 0;\n}\n\n.dtm_fieldCopy {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n\n.dtm_fieldTitle {\n  color: var(--dsw-alias-label-primary, #1a1a1a);\n  font-size: 11.5px;\n  font-weight: 500;\n}\n\n.dtm_fieldHint {\n  color: var(--dsw-alias-label-tertiary, #888);\n  font-size: 10.5px;\n  line-height: 15px;\n}\n\n.dtm_fieldControl {\n  flex: none;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n}\n\n.dtm_fieldGroup {\n  display: flex;\n  flex-direction: column;\n  padding-left: 8px;\n  border-left: 1.5px solid var(--dsw-alias-border-l1, rgb(0 0 0 / 8%));\n  margin-left: 1px;\n}\n\n.dtm_fieldGroup[data-disabled='true'] {\n  opacity: 0.55;\n}\n\n.dtm_fieldBlock {\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n}\n\n.dtm_input {\n  box-sizing: border-box;\n  width: 88px;\n  height: 26px;\n  padding: 0 7px;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  border-radius: 7px;\n  background: var(--dsw-alias-bg-base, transparent);\n  color: var(--dsw-alias-label-primary, #222);\n  font-family: inherit;\n  font-size: 11.5px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dtm_textarea {\n  box-sizing: border-box;\n  width: 100%;\n  min-height: 88px;\n  padding: 7px 8px;\n  resize: vertical;\n  border: 0.5px solid var(--dsw-alias-border-l2, rgb(0 0 0 / 14%));\n  border-radius: 8px;\n  background: var(--dsw-alias-bg-base, transparent);\n  color: var(--dsw-alias-label-secondary, #555);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: 10.5px;\n  line-height: 16px;\n}\n\n.dtm_switch {\n  box-sizing: border-box;\n  position: relative;\n  width: 34px;\n  height: 20px;\n  padding: 0;\n  border: 0;\n  border-radius: 999px;\n  background: var(--dsw-alias-border-l3, rgb(0 0 0 / 22%));\n  cursor: pointer;\n  transition: background-color 0.15s ease;\n}\n\n.dtm_switch[data-on='true'] {\n  background: var(--dtm-green);\n}\n\n.dtm_switch:disabled {\n  opacity: 0.5;\n  cursor: default;\n}\n\n.dtm_switchThumb {\n  position: absolute;\n  top: 2px;\n  left: 2px;\n  width: 16px;\n  height: 16px;\n  border-radius: 50%;\n  background: var(--dsw-alias-switch-thumb, #fff);\n  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);\n  transition: transform 0.15s ease;\n}\n\n.dtm_switch[data-on='true'] .dtm_switchThumb {\n  transform: translateX(14px);\n}\n\n/* ---------------------------------------------------------------- 窄屏 */\n\n@media (max-width: 760px) {\n  .dtm_triggerText {\n    display: none;\n  }\n\n  .dtm_trigger {\n    width: 24px;\n    padding: 0;\n    justify-content: center;\n    border-color: transparent;\n  }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  .dtm_spinner,\n  .dtm_spin {\n    animation-duration: 2s;\n  }\n\n  .dtm_trigger,\n  .dtm_button,\n  .dtm_row,\n  .dtm_switch,\n  .dtm_switchThumb {\n    transition: none;\n  }\n}\n"
 
 // ---- src/client/index.js -------------------------------------
 const name = PLUGIN_ID
@@ -1893,7 +1993,12 @@ const HEADER_SLOT = 'conversation.session.header.actions'
 function mountStyles() {
   if (typeof document === 'undefined') return false
   const existing = document.querySelector(`style[data-plugin-css=${JSON.stringify(STYLE_TAG_ID)}]`)
-  if (existing !== null) return false
+  if (existing !== null) {
+    // HMR/插件热重载后 bundle 已是新代码，但 style 标签还留着旧 CSS。
+    // 复用标签时同步内容，避免开发期或升级后样式停留在旧版本。
+    if (existing.textContent !== STYLES) existing.textContent = STYLES
+    return false
+  }
   const tag = document.createElement('style')
   tag.dataset.plugin = PLUGIN_ID
   tag.dataset.pluginCss = STYLE_TAG_ID

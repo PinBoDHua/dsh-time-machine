@@ -104,6 +104,10 @@ body[data-ds-dark-theme] {
   cursor: default;
 }
 
+.dtm_panel:focus {
+  outline: none;
+}
+
 .dtm_panelHead {
   flex: none;
   display: flex;

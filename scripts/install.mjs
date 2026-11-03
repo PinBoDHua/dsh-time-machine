@@ -76,7 +76,8 @@ const change = (message) => console.log(`  · ${message}`)
 
 function readManifest() {
   try {
-    return JSON.parse(readFileSync(manifestPath, 'utf8'))
+    // Windows 编辑器/PowerShell 5 可能给 JSON 加 UTF-8 BOM；JSON.parse 会拒绝。
+    return JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''))
   } catch (error) {
     throw new Error(`无法读取 profile package.json：${error.message}`)
   }
@@ -87,8 +88,15 @@ function writeManifest(value) {
   const temp = `${manifestPath}.tmp-${process.pid}`
   writeFileSync(temp, text, 'utf8')
   try {
-    writeFileSync(manifestPath, text, 'utf8')
-    rmSync(temp, { force: true })
+    // rename 覆盖写：中途崩溃时原清单仍然完整。Windows 上目标被占用时
+    // rename 可能返回 EPERM/EACCES，退回“先删后改名”的兼容路径。
+    try {
+      renameSync(temp, manifestPath)
+    } catch (error) {
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES' && error?.code !== 'EEXIST') throw error
+      rmSync(manifestPath, { force: true })
+      renameSync(temp, manifestPath)
+    }
   } catch (error) {
     rmSync(temp, { force: true })
     throw error

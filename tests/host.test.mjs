@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -260,6 +260,94 @@ test('宿主接线：自动快照、面板接口、恢复与安全校验', async
   assert.equal(denied.status, 403)
 
   // 卸载时释放引擎
+  for (const { disposable } of fake.effects) {
+    if (typeof disposable === 'function') await disposable()
+  }
+})
+
+test('会话在轮次中切换工作目录后，旧引擎不会永久忙碌', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-cwd-'))
+  const ws1 = join(root, 'ws1')
+  const ws2 = join(root, 'ws2')
+  const data = join(root, 'data')
+  await mkdir(ws1, { recursive: true })
+  await mkdir(ws2, { recursive: true })
+  await writeFile(join(ws1, 'a.txt'), 'one\n')
+  process.env.DSH_TIME_MACHINE_DATA_DIR = data
+  t.after(async () => {
+    delete process.env.DSH_TIME_MACHINE_DATA_DIR
+    await rm(root, { recursive: true, force: true })
+  })
+  const s1 = { id: 's1', header: { cwd: ws1, origin: 'user', delegationDepth: 0 } }
+  const s2 = { id: 's2', header: { cwd: ws1, origin: 'user', delegationDepth: 0 } }
+  const sessions = {
+    get(id) {
+      return id === 's1' ? s1 : id === 's2' ? s2 : undefined
+    },
+  }
+  const webServer = fakeWebServer()
+  const fake = fakeCtx({ sessions, webServer })
+  await apply(fake.ctx)
+  const statusRoute = webServer.routes.get('/plugins/dsh-time-machine/status')
+
+  await fake.emit('session/event', s1, { type: 'turn/start', data: { turn: 1 } })
+  await fake.preExecute({ agent: { session: s1 }, signal: new AbortController().signal, callId: 'c1' })
+  await fake.emit('session/event', s1, { type: 'working-directory/change', data: { cwd: ws2 } })
+  await fake.emit('session/event', s1, { type: 'turn/end', data: { turn: 1, reason: 'completed' } })
+
+  await waitFor(async () => {
+    const response = await respond(statusRoute.handler, request('/plugins/dsh-time-machine/status?sessionId=s2'))
+    return response.body?.busy === false
+  })
+  const status = await respond(statusRoute.handler, request('/plugins/dsh-time-machine/status?sessionId=s2'))
+  assert.equal(status.body.busy, false)
+
+  for (const { disposable } of fake.effects) {
+    if (typeof disposable === 'function') await disposable()
+  }
+})
+
+test('同一工作区通过 junction/符号链接访问时共用引擎与时间线', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tm-canonical-'))
+  const ws = join(root, 'ws')
+  const link = join(root, 'ws-link')
+  const data = join(root, 'data')
+  await mkdir(ws, { recursive: true })
+  await writeFile(join(ws, 'a.txt'), 'one\n')
+  await symlink(ws, link, process.platform === 'win32' ? 'junction' : 'dir')
+  process.env.DSH_TIME_MACHINE_DATA_DIR = data
+  t.after(async () => {
+    delete process.env.DSH_TIME_MACHINE_DATA_DIR
+    await rm(root, { recursive: true, force: true })
+  })
+  const s1 = { id: 's-link', header: { cwd: link, origin: 'user', delegationDepth: 0 } }
+  const s2 = { id: 's-real', header: { cwd: ws, origin: 'user', delegationDepth: 0 } }
+  const sessions = {
+    get(id) {
+      return id === 's-link' ? s1 : id === 's-real' ? s2 : undefined
+    },
+  }
+  const webServer = fakeWebServer()
+  const fake = fakeCtx({ sessions, webServer })
+  await apply(fake.ctx)
+  const statusRoute = webServer.routes.get('/plugins/dsh-time-machine/status')
+  const checkpointRoute = webServer.routes.get('/plugins/dsh-time-machine/checkpoint')
+
+  const firstStatus = await respond(statusRoute.handler, request('/plugins/dsh-time-machine/status?sessionId=s-link'))
+  const secondStatus = await respond(statusRoute.handler, request('/plugins/dsh-time-machine/status?sessionId=s-real'))
+  assert.equal(firstStatus.body.total, 0)
+  assert.equal(secondStatus.body.total, 0)
+
+  const created = await respond(checkpointRoute.handler, request('/plugins/dsh-time-machine/checkpoint', {
+    method: 'POST',
+    key: firstStatus.body.key,
+    body: { sessionId: 's-link' },
+  }))
+  assert.equal(created.status, 200)
+  const after = await respond(statusRoute.handler, request('/plugins/dsh-time-machine/status?sessionId=s-real'))
+  assert.equal(after.body.total, 1)
+  assert.equal(after.body.checkpoints[0].id, created.body.checkpoint.id)
+
   for (const { disposable } of fake.effects) {
     if (typeof disposable === 'function') await disposable()
   }

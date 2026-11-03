@@ -3,9 +3,10 @@
 export const h = React.createElement
 
 export function DtmBanner(props) {
+  const kind = props.kind ?? 'info'
   return h(
     'div',
-    { className: 'dtm_banner', 'data-kind': props.kind ?? 'info', role: props.role ?? 'status' },
+    { className: 'dtm_banner', 'data-kind': kind, role: props.role ?? (kind === 'error' ? 'alert' : 'status') },
     h('span', { className: 'dtm_bannerText' }, props.children),
     props.action ?? null
   )

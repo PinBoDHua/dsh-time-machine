@@ -12,7 +12,12 @@ const HEADER_SLOT = 'conversation.session.header.actions'
 function mountStyles() {
   if (typeof document === 'undefined') return false
   const existing = document.querySelector(`style[data-plugin-css=${JSON.stringify(STYLE_TAG_ID)}]`)
-  if (existing !== null) return false
+  if (existing !== null) {
+    // HMR/插件热重载后 bundle 已是新代码，但 style 标签还留着旧 CSS。
+    // 复用标签时同步内容，避免开发期或升级后样式停留在旧版本。
+    if (existing.textContent !== STYLES) existing.textContent = STYLES
+    return false
+  }
   const tag = document.createElement('style')
   tag.dataset.plugin = PLUGIN_ID
   tag.dataset.pluginCss = STYLE_TAG_ID

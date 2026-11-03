@@ -73,7 +73,7 @@ const status = {
   },
   lastError: null,
   journals: [],
-  version: '0.2.0',
+  version: '0.3.0',
   gitAvailable: true,
 }
 const plan = {
@@ -116,9 +116,12 @@ const draft = {
   auto: true,
   beforeTurn: true,
   afterTurn: true,
+  autoGc: true,
   maxCheckpoints: '120',
   maxAgeDays: '14',
   timeoutMs: '30000',
+  restoreTimeoutMs: '120000',
+  maxRestoreFileMiB: '64',
   excludesText: '.git/\nnode_modules/\n.dsh-time-machine/\n# 每行一个 gitignore 规则',
 }
 const baseProps = {

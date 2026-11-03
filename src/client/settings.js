@@ -3,13 +3,17 @@ import { DtmBanner, DtmButton, DtmSpinner, h } from './ui.js'
 
 export function settingsDraftOf(settings) {
   const source = settings ?? DEFAULT_CONFIG
+  const maxRestoreBytes = source.maxRestoreFileBytes ?? DEFAULT_CONFIG.maxRestoreFileBytes
   return {
     auto: source.auto !== false,
     beforeTurn: source.beforeTurn !== false,
     afterTurn: source.afterTurn !== false,
+    autoGc: source.autoGc !== false,
     maxCheckpoints: String(source.maxCheckpoints ?? DEFAULT_CONFIG.maxCheckpoints),
     maxAgeDays: String(source.maxAgeDays ?? DEFAULT_CONFIG.maxAgeDays),
     timeoutMs: String(source.timeoutMs ?? DEFAULT_CONFIG.timeoutMs),
+    restoreTimeoutMs: String(source.restoreTimeoutMs ?? DEFAULT_CONFIG.restoreTimeoutMs),
+    maxRestoreFileMiB: String(Math.max(1, Math.round(Number(maxRestoreBytes) / (1024 * 1024)))),
     excludesText: Array.isArray(source.excludes) ? source.excludes.join('\n') : DEFAULT_CONFIG.excludes.join('\n'),
   }
 }
@@ -19,9 +23,12 @@ export function settingsPayloadOf(draft) {
     auto: draft.auto === true,
     beforeTurn: draft.beforeTurn === true,
     afterTurn: draft.afterTurn === true,
+    autoGc: draft.autoGc === true,
     maxCheckpoints: Number(draft.maxCheckpoints),
     maxAgeDays: Number(draft.maxAgeDays),
     timeoutMs: Number(draft.timeoutMs),
+    restoreTimeoutMs: Number(draft.restoreTimeoutMs),
+    maxRestoreFileBytes: Math.round(Number(draft.maxRestoreFileMiB) * 1024 * 1024),
     excludes: String(draft.excludesText ?? '')
       .split('\n')
       .map((line) => line.trim())
@@ -133,6 +140,15 @@ export function SettingsView(props) {
     ),
     h(
       DtmField,
+      { name: 'autogc', title: t('panel.settings.autoGc'), hint: t('panel.settings.autoGcHint') },
+      h(DtmSwitch, {
+        checked: draft.autoGc,
+        label: t('panel.settings.autoGc'),
+        onChange: (value) => onChange({ ...draft, autoGc: value }),
+      })
+    ),
+    h(
+      DtmField,
       { name: 'max', title: t('panel.settings.max'), hint: t('panel.settings.maxUnit') },
       h(DtmNumberInput, {
         value: draft.maxCheckpoints,
@@ -163,6 +179,29 @@ export function SettingsView(props) {
         step: 1000,
         label: t('panel.settings.timeout'),
         onChange: (value) => onChange({ ...draft, timeoutMs: value }),
+      })
+    ),
+    h(
+      DtmField,
+      { name: 'restore-timeout', title: t('panel.settings.restoreTimeout'), hint: t('panel.settings.restoreTimeoutUnit') },
+      h(DtmNumberInput, {
+        value: draft.restoreTimeoutMs,
+        min: 10000,
+        max: 600000,
+        step: 1000,
+        label: t('panel.settings.restoreTimeout'),
+        onChange: (value) => onChange({ ...draft, restoreTimeoutMs: value }),
+      })
+    ),
+    h(
+      DtmField,
+      { name: 'max-restore-size', title: t('panel.settings.maxRestoreSize'), hint: t('panel.settings.maxRestoreSizeUnit') },
+      h(DtmNumberInput, {
+        value: draft.maxRestoreFileMiB,
+        min: 1,
+        max: 1024,
+        label: t('panel.settings.maxRestoreSize'),
+        onChange: (value) => onChange({ ...draft, maxRestoreFileMiB: value }),
       })
     ),
     h(
